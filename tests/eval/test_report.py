@@ -79,7 +79,7 @@ def test_json_keeps_the_outputs_per_config_and_per_run() -> None:
 
 
 def _counted(rep: int, tp: int, fp: int, fn: int) -> RunResult:
-    score = CaseScore(tp, fp, fn, tp, fn, 0, 0, tp, ())
+    score = CaseScore(tp, fp, fn, tp, fn, 0, 0, tp, (), tp_required=tp, rule_matched=tp)
     return RunResult("rules", "c", rep, "completed", None, (), score, OutputCounts(first_try=1))
 
 

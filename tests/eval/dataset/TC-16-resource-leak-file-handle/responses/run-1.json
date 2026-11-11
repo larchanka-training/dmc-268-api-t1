@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "1",
+  "findings": [
+    {
+      "filePath": "app/application/export.py",
+      "side": "new",
+      "line": 13,
+      "category": "correctness",
+      "severity": "medium",
+      "message": "Файл не закрывается при ошибке: если `writerow` или `getattr` бросит исключение, `handle.close()` не выполнится — дескриптор утечёт, а частично записанный файл останется. Откройте файл через `with open(...) as handle:`.",
+      "confidence": 0.85,
+      "suggestion": null,
+      "rule": null
+    },
+    {
+      "filePath": "app/application/export.py",
+      "side": "new",
+      "line": 17,
+      "category": "readability",
+      "severity": "low",
+      "message": "`csv.DictWriter` с `fieldnames=COLUMNS` выразил бы то же без ручного `getattr` по колонкам.",
+      "confidence": 0.4,
+      "suggestion": null,
+      "rule": null
+    }
+  ],
+  "summary": {
+    "problem": "Файл выгрузки открывается без `with` и утекает на пути ошибки.",
+    "positives": [
+      "Явные `newline=\"\"` и кодировка для CSV"
+    ],
+    "effort": "низкие"
+  }
+}

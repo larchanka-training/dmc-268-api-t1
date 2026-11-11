@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1",
+  "findings": [
+    {
+      "filePath": "app/api/admin_exports.py",
+      "side": "new",
+      "line": 21,
+      "category": "security",
+      "severity": "high",
+      "message": "Обход каталога: `name` приходит из query без проверки, и `EXPORT_DIR / name` с `../` или абсолютным путём отдаёт любой файл, доступный процессу (например, `?name=../../../etc/passwd`). Привести путь через `resolve()` и проверить `is_relative_to(EXPORT_DIR)`, либо принимать только имя без разделителей.",
+      "confidence": 0.85,
+      "suggestion": {
+        "diff": "-    return FileResponse(EXPORT_DIR / name)\n+    path = (EXPORT_DIR / name).resolve()\n+    if not path.is_relative_to(EXPORT_DIR.resolve()) or not path.is_file():\n+        raise HTTPException(status_code=404)\n+    return FileResponse(path)"
+      },
+      "rule": null
+    },
+    {
+      "filePath": "app/handlers/handler_000.py",
+      "side": "new",
+      "line": 5,
+      "category": "readability",
+      "severity": "low",
+      "message": "200 модулей отличаются только номером шага и одним из четырёх тел — это таблица, а не код: одна параметризованная функция и список шагов сократили бы PR на тысячи строк и реестр не пришлось бы держать вручную.",
+      "confidence": 0.4,
+      "suggestion": null,
+      "rule": null
+    }
+  ],
+  "summary": {
+    "problem": "В ручке `/admin/exports/file` имя файла из запроса склеивается с каталогом без проверки — обход каталога. Пакет контекста вместил не все hunk'и: часть обработчиков `app/handlers/` и `app/workers/retry.py` в пакет не вошли и не проверены.",
+    "positives": [
+      "Обработчики — чистые функции без ввода-вывода, реестр собран в одном месте"
+    ],
+    "effort": "высокие"
+  }
+}

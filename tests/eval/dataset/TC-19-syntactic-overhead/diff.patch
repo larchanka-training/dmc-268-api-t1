@@ -1,0 +1,27 @@
+diff --git a/app/domain/publishing.py b/app/domain/publishing.py
+index c1edf08..d8312f8 100644
+--- a/app/domain/publishing.py
++++ b/app/domain/publishing.py
+@@ -2,3 +2,22 @@
+ 
+ from app.domain.entities import Finding
+ from app.domain.enums import FindingSeverity
++
++
++def _is_blocking(finding: Finding) -> bool:
++    if (finding.severity in (FindingSeverity.HIGH, FindingSeverity.CRITICAL)) == True:
++        return True
++    else:
++        return False
++
++
++def publishable(findings: list[Finding]) -> list[Finding]:
++    result = []
++    for i in range(len(findings)):
++        if _is_blocking(findings[i]):
++            result.append(findings[i])
++    return list(result)
++
++
++def file_paths(findings: list[Finding]) -> list[str]:
++    return list(sorted(list(set([str(f.file_path) for f in findings]))))

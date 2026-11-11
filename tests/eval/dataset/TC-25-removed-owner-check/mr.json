@@ -1,0 +1,6 @@
+{
+  "title": "feat: архивировать прогоны при удалении проекта",
+  "description": "Перед удалением проекта его прогоны ревью переводятся в архив, чтобы отчёты не теряли ссылку.",
+  "source_branch": "feat/archive-runs-on-delete",
+  "target_branch": "develop"
+}

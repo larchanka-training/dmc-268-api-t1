@@ -1,0 +1,6 @@
+{
+  "title": "feat: сводки заказов клиента",
+  "description": "Сводка по каждому заказу клиента: число позиций и сумма.",
+  "source_branch": "feat/order-summaries",
+  "target_branch": "develop"
+}

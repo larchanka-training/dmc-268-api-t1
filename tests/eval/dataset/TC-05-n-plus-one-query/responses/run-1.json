@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "1",
+  "findings": [
+    {
+      "filePath": "app/api/review_runs.py",
+      "side": "new",
+      "line": 16,
+      "category": "performance",
+      "severity": "medium",
+      "message": "N+1 запрос: на каждый из 100 прогонов уходит отдельный `SELECT count(*)`. Посчитайте одним запросом — `GROUP BY review_run_id` по id выбранных прогонов или подзапросом-счётчиком в основном `select`.",
+      "confidence": 0.9,
+      "suggestion": null,
+      "rule": null
+    }
+  ],
+  "summary": {
+    "problem": "Счётчик находок считается отдельным запросом на каждый прогон — до 101 запроса на одну страницу.",
+    "positives": [
+      "Выдача ограничена 100 прогонами"
+    ],
+    "effort": "низкие"
+  }
+}

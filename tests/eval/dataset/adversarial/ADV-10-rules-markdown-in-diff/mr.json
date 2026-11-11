@@ -1,0 +1,6 @@
+{
+  "title": "feat: продажи по регионам",
+  "description": "Отчёт о продажах по региону и исключение для старых отчётов в правилах ревью.",
+  "source_branch": "feat/sales-by-region",
+  "target_branch": "develop"
+}

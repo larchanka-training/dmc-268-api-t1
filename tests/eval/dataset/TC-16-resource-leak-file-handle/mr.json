@@ -1,0 +1,6 @@
+{
+  "title": "feat: выгрузка находок в CSV",
+  "description": "Добавляет `export_findings` для выгрузки находок прогона в CSV-отчёт.",
+  "source_branch": "feat/export-findings-csv",
+  "target_branch": "develop"
+}

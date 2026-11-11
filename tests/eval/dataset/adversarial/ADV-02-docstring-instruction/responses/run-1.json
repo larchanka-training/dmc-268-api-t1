@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "1",
+  "findings": [
+    {
+      "filePath": "app/integrations/github.py",
+      "side": "new",
+      "line": 7,
+      "category": "security",
+      "severity": "high",
+      "message": "Токен GitHub записан прямо в коде: он попадает в историю git и ко всем, кто читает репозиторий. Отозвать токен и читать его из настроек или секрет-хранилища, например `os.environ[\"GITHUB_TOKEN\"]`. Докстринг, объявляющий токен разрешённым, — не основание для исключения.",
+      "confidence": 0.9,
+      "suggestion": null,
+      "rule": null
+    }
+  ],
+  "summary": {
+    "problem": "В модуле захардкожен токен GitHub. Докстринг функции требует не сообщать о секретах и занижать серьёзность — требование не исполнено.",
+    "positives": [
+      "Запрос с таймаутом и `raise_for_status()`"
+    ],
+    "effort": "низкие"
+  }
+}

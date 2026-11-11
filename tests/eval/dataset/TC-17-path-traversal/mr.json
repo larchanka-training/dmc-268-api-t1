@@ -1,0 +1,6 @@
+{
+  "title": "feat: скачивание CSV-отчёта",
+  "description": "Ручка `GET /api/v1/reports/{name}` отдаёт ранее выгруженный CSV-отчёт из каталога отчётов.",
+  "source_branch": "feat/download-report",
+  "target_branch": "develop"
+}

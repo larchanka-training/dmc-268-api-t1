@@ -40,14 +40,14 @@ FAKE_TOFU = """#!/usr/bin/env bash
 case "$*" in
   *"output -raw migrate_env") printf '%s\\n' "DATABASE_URL=$MIGRATE_DATABASE_URL" \\
     "RABBITMQ_URL=amqp://guest:guest@localhost:5672/%2F" "GITHUB_WEBHOOK_SECRET=chaos" \\
-    "POSTGRES_MONITOR_PASSWORD=chaos-monitor" ;;
+    "POSTGRES_MONITOR_PASSWORD=dmc268_monitor" "POSTGRES_APP_PASSWORD=dmc268_app" ;;
   *) exit 3 ;;
 esac
 """
 
 # `run`: флаги migrations_run из migrate.sh отбрасываются, переменные из
 # --env-file экспортируются, после образа — команда alembic или
-# `python alembic/monitor_password.py` (пароль роли мониторинга после миграций). `pull` и `rm` — no-op.
+# `python alembic/role_passwords.py` (пароли ролей после миграций). `pull` и `rm` — no-op.
 FAKE_DOCKER = """#!/usr/bin/env bash
 case "$1" in
   run)

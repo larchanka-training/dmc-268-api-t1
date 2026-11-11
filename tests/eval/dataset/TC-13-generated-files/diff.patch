@@ -1,0 +1,123 @@
+diff --git a/admin/package-lock.json b/admin/package-lock.json
+index 77eebe2..12f50a0 100644
+--- a/admin/package-lock.json
++++ b/admin/package-lock.json
+@@ -8,13 +8,13 @@
+       "name": "shop-admin",
+       "version": "0.1.0",
+       "dependencies": {
+-        "left-pad-fake": "^1.3.0"
++        "left-pad-fake": "^1.4.0"
+       }
+     },
+     "node_modules/left-pad-fake": {
+-      "version": "1.3.0",
+-      "resolved": "https://registry.example.invalid/left-pad-fake/-/left-pad-fake-1.3.0.tgz",
+-      "integrity": "sha512-FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE0001=="
++      "version": "1.4.0",
++      "resolved": "https://registry.example.invalid/left-pad-fake/-/left-pad-fake-1.4.0.tgz",
++      "integrity": "sha512-FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE0002=="
+     }
+   }
+ }
+diff --git a/alembic/versions/0042a1b2c3d4_webhooks_secret_hash.py b/alembic/versions/0042a1b2c3d4_webhooks_secret_hash.py
+new file mode 100644
+index 0000000..c0c502c
+--- /dev/null
++++ b/alembic/versions/0042a1b2c3d4_webhooks_secret_hash.py
+@@ -0,0 +1,23 @@
++"""webhooks.secret_hash
++
++Revision ID: 0042a1b2c3d4
++Revises: 0041f0e9d8c7
++Create Date: 2026-11-01 09:00:00+00:00
++"""
++
++import sqlalchemy as sa
++
++from alembic import op
++
++revision = "0042a1b2c3d4"
++down_revision = "0041f0e9d8c7"
++branch_labels = None
++depends_on = None
++
++
++def upgrade() -> None:
++    op.add_column("webhooks", sa.Column("secret_hash", sa.LargeBinary(), nullable=True))
++
++
++def downgrade() -> None:
++    op.drop_column("webhooks", "secret_hash")
+diff --git a/app/clients/billing_api.generated.py b/app/clients/billing_api.generated.py
+new file mode 100644
+index 0000000..f694eeb
+--- /dev/null
++++ b/app/clients/billing_api.generated.py
+@@ -0,0 +1,16 @@
++# Код сгенерирован openapi-generator 7.9.0 из billing-api.yaml. Не редактировать вручную.
++import httpx
++
++
++class BillingApiClient:
++    def __init__(self, base_url: str, token: str) -> None:
++        self._client = httpx.Client(base_url=base_url, verify=False, timeout=None)
++        self._token = token
++
++    def get_invoice(self, invoice_id: str) -> dict:
++        response = self._client.get(f"/invoices/{invoice_id}", headers={"Authorization": "Bearer " + self._token})
++        return response.json()
++
++    def list_invoices(self, customer_id: str) -> list:
++        response = self._client.get("/invoices", params={"customer_id": customer_id}, headers={"Authorization": "Bearer " + self._token})
++        return response.json()
+diff --git a/app/webhooks/verify.py b/app/webhooks/verify.py
+index 57121a1..81b22b9 100644
+--- a/app/webhooks/verify.py
++++ b/app/webhooks/verify.py
+@@ -1 +1,14 @@
+ """Проверка подписи входящих вебхуков."""
++
++import hashlib
++import hmac
++
++PREFIX = "sha256="
++
++
++def verify_signature(secret: bytes, body: bytes, header: str | None) -> bool:
++    """Правда, если заголовок `X-Signature-256` совпадает с HMAC-SHA256 сырого тела."""
++    if not header or not header.startswith(PREFIX):
++        return False
++    expected = PREFIX + hmac.new(secret, body, hashlib.sha256).hexdigest()
++    return header == expected
+diff --git a/pyproject.toml b/pyproject.toml
+index 7f6c241..ff9523f 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -3,5 +3,5 @@ name = "shop"
+ version = "0.1.0"
+ requires-python = ">=3.14"
+ dependencies = [
+-    "fastapi>=0.115",
++    "fastapi>=0.116",
+ ]
+diff --git a/uv.lock b/uv.lock
+index 0bf1e79..289991b 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -10,13 +10,13 @@ sdist = { url = "https://files.example.invalid/anyio-4.6.0.tar.gz", hash = "sha2
+ 
+ [[package]]
+ name = "fastapi"
+-version = "0.115.0"
++version = "0.116.1"
+ source = { registry = "https://pypi.org/simple" }
+ dependencies = [
+     { name = "pydantic" },
+     { name = "starlette" },
+ ]
+-sdist = { url = "https://files.example.invalid/fastapi-0.115.0.tar.gz", hash = "sha256:0000000000000000000000000000000000000000000000000000000000000002", size = 290000 }
++sdist = { url = "https://files.example.invalid/fastapi-0.116.1.tar.gz", hash = "sha256:0000000000000000000000000000000000000000000000000000000000000003", size = 296000 }
+ 
+ [[package]]
+ name = "shop"

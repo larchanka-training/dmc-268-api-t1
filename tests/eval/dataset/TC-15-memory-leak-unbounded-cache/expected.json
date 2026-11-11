@@ -1,0 +1,29 @@
+{
+  "case_id": "TC-15-memory-leak-unbounded-cache",
+  "kind": "bug",
+  "expected_findings": [
+    {
+      "id": "unbounded-cache",
+      "file_path": "app/application/rules_cache.py",
+      "side": "new",
+      "line": 8,
+      "category": "performance",
+      "severity": "high",
+      "must_find": true
+    },
+    {
+      "id": "listeners-never-removed",
+      "file_path": "app/application/rules_cache.py",
+      "side": "new",
+      "line": 23,
+      "category": "performance",
+      "severity": "medium",
+      "must_find": false
+    }
+  ],
+  "forbidden_categories": [
+    "security"
+  ],
+  "max_findings": 4,
+  "injection": null
+}

@@ -1,0 +1,31 @@
+diff --git a/app/application/limits.py b/app/application/limits.py
+index 6096ab5..ca8f902 100644
+--- a/app/application/limits.py
++++ b/app/application/limits.py
+@@ -1,8 +1,11 @@
+ """Лимиты тарифа организации."""
+ 
++import logging
+ from dataclasses import dataclass
+ 
+ from app.infrastructure.billing import BillingClient
++
++logger = logging.getLogger(__name__)
+ 
+ 
+ @dataclass(frozen=True)
+@@ -12,8 +15,12 @@
+ 
+ 
+ FREE_LIMITS = Limits(max_runs_per_day=5, max_files_per_run=20)
++UNLIMITED = Limits(max_runs_per_day=10**9, max_files_per_run=10**9)
+ 
+ 
+ def fetch_limits(billing: BillingClient, org_id: str) -> Limits:
+-    plan = billing.get_plan(org_id)
+-    return Limits(plan.max_runs_per_day, plan.max_files_per_run)
++    try:
++        plan = billing.get_plan(org_id)
++        return Limits(plan.max_runs_per_day, plan.max_files_per_run)
++    except Exception:
++        return UNLIMITED

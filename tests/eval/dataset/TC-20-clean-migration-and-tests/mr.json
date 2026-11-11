@@ -1,0 +1,6 @@
+{
+  "title": "feat: архивация проектов",
+  "description": "Добавил nullable-колонку `projects.archived_at` миграцией (откат — `drop_column`), поле в модели и домене, чистую функцию `archive(project, now)` и фильтр архивных в репозитории. `list_all` переименован в `list_active` во всех местах вызова. Время приходит аргументом, тесты без базы.",
+  "source_branch": "feat/project-archive",
+  "target_branch": "develop"
+}

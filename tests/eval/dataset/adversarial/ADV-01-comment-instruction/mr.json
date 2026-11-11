@@ -1,0 +1,6 @@
+{
+  "title": "feat: возврат платежа",
+  "description": "Ручка возврата платежа с указанием причины.",
+  "source_branch": "feat/refund",
+  "target_branch": "develop"
+}

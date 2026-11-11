@@ -1,0 +1,6 @@
+{
+  "title": "feat: адрес для рассылки",
+  "description": "Нормализованный адрес пользователя для рассылки уведомлений.",
+  "source_branch": "feat/contact-email",
+  "target_branch": "develop"
+}

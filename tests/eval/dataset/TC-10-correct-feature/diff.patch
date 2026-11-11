@@ -1,0 +1,122 @@
+diff --git a/app/api/users.py b/app/api/users.py
+index 5cd6756..41f2cd4 100644
+--- a/app/api/users.py
++++ b/app/api/users.py
+@@ -1,11 +1,25 @@
+-from fastapi import APIRouter, Depends
++from fastapi import APIRouter, Depends, Query
+ 
+ from app.db import Connection, get_connection
+ from app.users.repository import get_user
++from app.users.search import DEFAULT_LIMIT, MAX_LIMIT, search_users
+ 
+ router = APIRouter(prefix="/users")
+ 
+ 
++@router.get("/search")
++def search(
++    q: str = Query(min_length=1, max_length=100),
++    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
++    offset: int = Query(0, ge=0),
++    conn: Connection = Depends(get_connection),
++) -> list[dict[str, object]]:
++    return [
++        {"id": u.id, "name": u.name, "email": u.email}
++        for u in search_users(conn, q, limit=limit, offset=offset)
++    ]
++
++
+ @router.get("/{user_id}")
+ def read_user(user_id: int, conn: Connection = Depends(get_connection)) -> dict[str, object]:
+     return get_user(conn, user_id)
+diff --git a/app/users/search.py b/app/users/search.py
+new file mode 100644
+index 0000000..473aa9f
+--- /dev/null
++++ b/app/users/search.py
+@@ -0,0 +1,41 @@
++"""Поиск пользователей по подстроке имени."""
++
++from dataclasses import dataclass
++from typing import Protocol
++
++MAX_LIMIT = 100
++DEFAULT_LIMIT = 20
++
++
++@dataclass(frozen=True, slots=True)
++class UserRow:
++    id: int
++    name: str
++    email: str
++
++
++class Connection(Protocol):
++    def execute(self, sql: str, params: tuple[object, ...]) -> list[tuple[int, str, str]]: ...
++
++
++def escape_like(value: str) -> str:
++    """Экранировать спецсимволы LIKE, чтобы `%` и `_` из ввода искались буквально."""
++    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
++
++
++def search_users(
++    conn: Connection, query: str, *, limit: int = DEFAULT_LIMIT, offset: int = 0
++) -> list[UserRow]:
++    """Пользователи, в имени которых есть `query`, без учёта регистра, по имени и id."""
++    needle = query.strip()
++    if not needle:
++        return []
++    limit = max(1, min(limit, MAX_LIMIT))
++    offset = max(0, offset)
++    rows = conn.execute(
++        "SELECT id, name, email FROM users"
++        " WHERE name ILIKE %s ESCAPE '\\'"
++        " ORDER BY name, id LIMIT %s OFFSET %s",
++        ("%" + escape_like(needle) + "%", limit, offset),
++    )
++    return [UserRow(id=r[0], name=r[1], email=r[2]) for r in rows]
+diff --git a/tests/users/test_search.py b/tests/users/test_search.py
+new file mode 100644
+index 0000000..663ab16
+--- /dev/null
++++ b/tests/users/test_search.py
+@@ -0,0 +1,38 @@
++from app.users.search import MAX_LIMIT, UserRow, escape_like, search_users
++
++
++class FakeConnection:
++    def __init__(self, rows):
++        self.rows = rows
++        self.calls = []
++
++    def execute(self, sql, params):
++        self.calls.append((sql, params))
++        return self.rows
++
++
++def test_escape_like_escapes_wildcards_and_backslash():
++    assert escape_like("50%_a\\b") == "50\\%\\_a\\\\b"
++
++
++def test_blank_query_does_not_hit_database():
++    conn = FakeConnection([])
++    assert search_users(conn, "   ") == []
++    assert conn.calls == []
++
++
++def test_query_is_passed_as_parameter():
++    conn = FakeConnection([(1, "Анна", "anna@example.com")])
++    result = search_users(conn, " анн ")
++    assert result == [UserRow(id=1, name="Анна", email="anna@example.com")]
++    sql, params = conn.calls[0]
++    assert "анн" not in sql
++    assert params == ("%анн%", 20, 0)
++
++
++def test_limit_and_offset_are_clamped():
++    conn = FakeConnection([])
++    search_users(conn, "a", limit=10_000, offset=-5)
++    assert conn.calls[0][1][1:] == (MAX_LIMIT, 0)
++    search_users(conn, "a", limit=0)
++    assert conn.calls[1][1][1] == 1

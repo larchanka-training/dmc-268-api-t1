@@ -1,0 +1,89 @@
+diff --git a/app/api/orders.py b/app/api/orders.py
+index 772795a..0d5d41f 100644
+--- a/app/api/orders.py
++++ b/app/api/orders.py
+@@ -1,18 +1,19 @@
++from decimal import Decimal
++
+ from fastapi import APIRouter
+ 
+ from app.billing.models import OrderItem
+ from app.billing.repository import load_items
+-from app.billing.totals import calc, calc_tax
++from app.billing.totals import calculate_tax, calculate_total
+ 
+ router = APIRouter()
+ 
++TAX_RATE = Decimal("0.20")
++
+ 
+ @router.get("/orders/{order_id}/total")
+ def order_total(order_id: int) -> dict[str, str]:
+     items: list[OrderItem] = load_items(order_id)
+-    total = calc(items)
+-    tax = calc_tax(items, rate=TAX_RATE)
++    total = calculate_total(items)
++    tax = calculate_tax(items, rate=TAX_RATE)
+     return {"total": str(total), "tax": str(tax)}
+-
+-
+-TAX_RATE = __import__("decimal").Decimal("0.20")
+diff --git a/app/billing/totals.py b/app/billing/totals.py
+index fbe51f2..35dbdd9 100644
+--- a/app/billing/totals.py
++++ b/app/billing/totals.py
+@@ -1,12 +1,19 @@
++"""Подсчёт сумм заказа."""
++
++from collections.abc import Sequence
+ from decimal import Decimal
+ 
++from app.billing.models import OrderItem
++
++CENT = Decimal("0.01")
++
+ 
+-def calc(items):
+-    t = Decimal("0")
+-    for i in items:
+-        t += i.price * i.qty
+-    return t
++def calculate_total(items: Sequence[OrderItem]) -> Decimal:
++    total = Decimal("0")
++    for item in items:
++        total += item.price * item.qty
++    return total
+ 
+ 
+-def calc_tax(items, rate):
+-    return (calc(items) * rate).quantize(Decimal("0.01"))
++def calculate_tax(items: Sequence[OrderItem], rate: Decimal) -> Decimal:
++    return (calculate_total(items) * rate).quantize(CENT)
+diff --git a/tests/billing/test_totals.py b/tests/billing/test_totals.py
+index d50ee75..4f38a8d 100644
+--- a/tests/billing/test_totals.py
++++ b/tests/billing/test_totals.py
+@@ -1,14 +1,18 @@
+ from decimal import Decimal
+ 
+ from app.billing.models import OrderItem
+-from app.billing.totals import calc, calc_tax
++from app.billing.totals import calculate_tax, calculate_total
+ 
+ 
+-def test_calc():
++def test_calculate_total_sums_price_times_qty():
+     items = [OrderItem(price=Decimal("10.00"), qty=2), OrderItem(price=Decimal("0.99"), qty=1)]
+-    assert calc(items) == Decimal("20.99")
++    assert calculate_total(items) == Decimal("20.99")
+ 
+ 
+-def test_calc_tax_rounds_to_cents():
++def test_calculate_total_of_empty_order_is_zero():
++    assert calculate_total([]) == Decimal("0")
++
++
++def test_calculate_tax_rounds_to_cents():
+     items = [OrderItem(price=Decimal("0.99"), qty=1)]
+-    assert calc_tax(items, Decimal("0.20")) == Decimal("0.20")
++    assert calculate_tax(items, Decimal("0.20")) == Decimal("0.20")

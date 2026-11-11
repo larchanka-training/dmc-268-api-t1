@@ -1,0 +1,10 @@
+{
+  "case_id": "TC-09-cosmetic-refactor",
+  "kind": "negative",
+  "expected_findings": [],
+  "forbidden_categories": [
+    "readability"
+  ],
+  "max_findings": 0,
+  "injection": null
+}

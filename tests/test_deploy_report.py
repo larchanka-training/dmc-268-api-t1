@@ -42,11 +42,16 @@ DEPLOY_WORKFLOW = Path(".github/workflows/deploy.yml")
 
 # Подложный tofu: `plan -out=<файл>` создаёт файл плана, `show -json`
 # отдаёт фикстуру, `apply <файл>` без файла падает, а с ним — если велит
-# тест. `output -raw` отдаёт окружение миграций. Вызовы — в журнал.
+# тест. `output -raw` отдаёт окружение миграций, `state list` — адреса из
+# STATE_LIST, а с NO_STATE — ответ OpenTofu без состояния (код 1). Вызовы — в
+# журнал.
 FAKE_TOFU = """#!/usr/bin/env bash
 args="$*"
 echo "$args" >> "$CALLS"
 case "$args" in
+  *" state list")
+    [ -z "${NO_STATE:-}" ] || { echo "No state file was found!" >&2; exit 1; }
+    printf '%s\\n' "${STATE_LIST:-}" ;;
   *" plan "*) out="${args##*-out=}"; touch "infra/${out%% *}" ;;
   *" show -json "*) cat "$PLAN_JSON" ;;
   *" apply "*) [ -e "infra/${args##* }" ] || exit 3; exit "${APPLY_EXIT:-0}" ;;
@@ -58,7 +63,7 @@ esac
 # upgrade head` печатает вывод alembic из MIGRATE_LOG и выходит с
 # MIGRATE_EXIT; у N-й попытки — MIGRATE_LOG_N и MIGRATE_EXIT_N, если заданы.
 # `run … alembic current` печатает CURRENT (с CURRENT_FAIL — код 255, как при
-# оборванном ssh), `run … python alembic/monitor_password.py` (пароль роли мониторинга) с MONITOR_FAIL
+# оборванном ssh), `run … python alembic/role_passwords.py` (пароли ролей) печатает ROLES_OUT и с ROLES_FAIL
 # выходит с этим кодом, `rm` контейнера, которого нет, — код 1.
 FAKE_DOCKER = """#!/usr/bin/env bash
 echo "docker $*" >> "$CALLS"
@@ -66,7 +71,7 @@ case "$1" in
   run)
     case "$*" in
       *"alembic current"*) [ -z "${CURRENT_FAIL:-}" ] || exit 255; printf '%s\\n' "${CURRENT:-}" ;;
-      *" python alembic/monitor_password.py") exit "${MONITOR_FAIL:-0}" ;;
+      *" python alembic/role_passwords.py") [ -z "${ROLES_OUT:-}" ] || printf '%s\\n' "$ROLES_OUT"; exit "${ROLES_FAIL:-0}" ;;
       *)
         n=$(( $(cat "$CALLS.upgrades" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$CALLS.upgrades"
         log="MIGRATE_LOG_$n" code="MIGRATE_EXIT_$n"
@@ -249,6 +254,48 @@ def test_targeted_plan_without_changes_is_applied_as_checked(tmp_path: Path) -> 
     assert calls[-1] == f"-chdir=infra apply -input=false -no-color -lock-timeout=2m {out.group(1)}", calls
     assert json.loads((report / "plan-infra.json").read_text())["changes"] == {}
     assert not list((root / "infra").glob("*tfplan*"))
+
+
+# Воркер до #99 жил по адресу без ключа, теперь — первый экземпляр for_each.
+# Targeted-план с непроведённым `moved` OpenTofu не строит («Moved resource
+# instances excluded by targeting», `prePlanVerifyMovesWithTargetFlag` в
+# internal/tofu/context_plan.go v1.13.2), поэтому infra.sh переносит адрес
+# сам — до плана и только пока старый адрес в состоянии.
+WORKER_MOVE = 'state mv -lock-timeout=2m docker_container.worker docker_container.worker["dmc268-worker"]'
+
+
+def test_targeted_step_moves_the_single_worker_address_before_the_plan(tmp_path: Path) -> None:
+    result, _, _ = run_script(
+        tmp_path, "infra.sh", plan="plan-infra-no-changes.json",
+        STATE_LIST="docker_container.api\ndocker_container.worker\ndocker_volume.postgres",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = (tmp_path / "calls").read_text().splitlines()
+    move = calls.index(f"-chdir=infra {WORKER_MOVE}")
+    plan = next(i for i, c in enumerate(calls) if " plan " in c)
+    assert move < plan, calls
+
+
+def test_targeted_step_leaves_a_moved_worker_alone(tmp_path: Path) -> None:
+    result, _, _ = run_script(
+        tmp_path, "infra.sh", plan="plan-infra-no-changes.json",
+        STATE_LIST='docker_container.api\ndocker_container.worker["dmc268-worker"]\ndocker_container.worker["dmc268-worker-2"]',
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert " state mv " not in (tmp_path / "calls").read_text()
+
+
+def test_targeted_step_on_a_server_without_state_skips_the_move(tmp_path: Path) -> None:
+    """Чистый сервер или потерянное состояние: `state list` выходит с кодом 1 («No state file
+    was found»), переносить нечего, и шаг идёт к плану, а не падает под `set -e`."""
+    result, _, _ = run_script(tmp_path, "infra.sh", plan="plan-infra-no-changes.json", NO_STATE="1")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = (tmp_path / "calls").read_text()
+    assert " state mv " not in calls
+    assert " plan " in calls and " apply " in calls
 
 
 def test_manual_override_lets_the_database_be_replaced_with_a_warning(tmp_path: Path) -> None:
@@ -804,7 +851,7 @@ def test_summary_of_a_migrate_step_that_failed_before_alembic(tmp_path: Path) ->
 
 
 def test_summary_warns_when_migrations_failed_after_a_password_change(tmp_path: Path) -> None:
-    """Ревью #221: шаг паролей зелёный, а старые API и воркер до следующего деплоя не откроют новых соединений."""
+    """Ревью #221: шаг паролей зелёный, а прежние копии и replication-setup до следующего деплоя не откроют новых соединений."""
     report = tmp_path / "report"
     report.mkdir()
     (report / "migrate.log").write_text(FAILED_MIGRATION_LOG)
@@ -816,10 +863,26 @@ def test_summary_warns_when_migrations_failed_after_a_password_change(tmp_path: 
                    GITHUB_SERVER_URL="https://github.com", GITHUB_REPOSITORY="o/r", SHA="abc123")
 
     assert "Сменены в этом деплое: база (`postgres`)." in text
-    assert "> [!WARNING]\n> Пароль сменён, а API и воркер не заменены" in text
+    assert "> [!WARNING]\n> Пароль сменён, а `postgres-backup` и `replication-setup` не заменены" in text
+    assert "API и воркер" not in text.split("### Пароли")[1].split("### Простой API")[0]
     assert "[«Откат»](https://github.com/o/r/blob/abc123/infra/README.md#откат)" in text
     # Раздел — сразу за таблицей исхода: дежурный видит его первым.
     assert text.index("### Пароли") < text.index("### Простой API")
+
+
+def test_summary_warns_about_api_and_worker_after_an_app_role_password_change(tmp_path: Path) -> None:
+    """Ревью #416: пароль роли приложения сменён, apply упал — не открывают новых API и воркер, а не копии."""
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "passwords-changed").write_text("postgres-app\n")
+    results = ALL_SUCCESS.replace("apply success success", "apply failure failure")
+
+    text = summary(tmp_path, report, JOB_STATUS="failure", STEP_RESULTS=results,
+                   GITHUB_SERVER_URL="https://github.com", GITHUB_REPOSITORY="o/r", SHA="abc123")
+
+    assert "Сменены в этом деплое: роль приложения (`dmc268_app`)." in text
+    assert "> [!WARNING]\n> Пароль сменён, а API и воркер не заменены" in text
+    assert "`postgres-backup`" not in text.split("### Пароли")[1].split("### Простой API")[0]
 
 
 def test_summary_of_a_password_change_that_reached_apply_has_no_warning(tmp_path: Path) -> None:
@@ -933,8 +996,8 @@ def test_every_migrations_run_takes_the_shared_arguments() -> None:
     assert len([line for line in lines if '"${migrations_run[@]}"' in line]) == 3, lines
 
 
-def test_migrate_sets_the_monitor_password_after_a_success(tmp_path: Path) -> None:
-    """Шаг пароля роли мониторинга — один раз, после удачного upgrade, тем же
+def test_migrate_sets_the_role_passwords_after_a_success(tmp_path: Path) -> None:
+    """Шаг паролей ролей — один раз, после удачного upgrade, тем же
     образом; вывод alembic в migrate.log он не перезаписывает."""
     (tmp_path / "alembic.log").write_text(APPLIED_LOG)
     result, report, _ = run_script(
@@ -946,25 +1009,25 @@ def test_migrate_sets_the_monitor_password_after_a_success(tmp_path: Path) -> No
     assert result.returncode == 0, result.stdout + result.stderr
     runs = [c for c in (tmp_path / "calls").read_text().splitlines() if c.startswith("docker run ")]
     assert "alembic upgrade head" in runs[0], runs
-    assert runs[-1].endswith('ghcr.io/o/r:t@sha256:' + "0" * 64 + " python alembic/monitor_password.py"), runs
+    assert runs[-1].endswith('ghcr.io/o/r:t@sha256:' + "0" * 64 + " python alembic/role_passwords.py"), runs
     assert len(runs) == 2, runs
     assert (report / "migrate.log").read_text() == APPLIED_LOG
 
 
-def test_a_failed_monitor_password_step_is_not_a_failed_migration(tmp_path: Path) -> None:
-    """Ревью #130: миграции зафиксированы, упал отдельный шаг пароля — summary
-    не пишет «упала на ревизии», а пишет, что пароль не обновлён; шаг под timeout."""
+def test_a_failed_role_passwords_step_is_not_a_failed_migration(tmp_path: Path) -> None:
+    """Ревью #130: миграции зафиксированы, упал отдельный шаг паролей — summary
+    не пишет «упала на ревизии», а пишет, что пароли не обновлены; шаг под timeout."""
     (tmp_path / "alembic.log").write_text(APPLIED_LOG)
     result, report, _ = run_script(
         tmp_path, "migrate.sh",
         API_IMAGE="ghcr.io/o/r:t@sha256:" + "0" * 64, DOCKER_HOST="ssh://stand",
-        MIGRATE_LOG=str(tmp_path / "alembic.log"), MONITOR_FAIL="2",
+        MIGRATE_LOG=str(tmp_path / "alembic.log"), ROLES_FAIL="2",
     )
 
     assert result.returncode == 2
     calls = (tmp_path / "calls").read_text().splitlines()
-    assert any(c.startswith("timeout 60 docker run ") and c.endswith(" python alembic/monitor_password.py") for c in calls), calls
-    assert (report / "migrate-monitor.error").read_text().strip() == "2"
+    assert any(c.startswith("timeout 60 docker run ") and c.endswith(" python alembic/role_passwords.py") for c in calls), calls
+    assert (report / "migrate-roles.error").read_text().strip() == "2"
     assert (report / "migrate.log").read_text() == APPLIED_LOG
 
     results = ALL_SUCCESS.replace("migrate success success", "migrate failure failure")
@@ -972,10 +1035,40 @@ def test_a_failed_monitor_password_step_is_not_a_failed_migration(tmp_path: Path
     assert "| Применено ревизий | `dmc268.deploy.migrations.applied` | 2 |" in text
     assert "| Ревизия после | `dmc268.deploy.migrations.revision.to` | `0014_d` |" in text
     assert "Упала на ревизии" not in text
-    assert "пароль роли мониторинга `dmc268_monitor` не обновлён (код 2)" in text
+    assert "пароли ролей `dmc268_monitor` и `dmc268_app` не обновлены (код 2)" in text
+    assert "apply не запускался" in text
 
 
-def test_a_successful_monitor_password_step_leaves_no_marker(tmp_path: Path) -> None:
+def test_migrate_marks_a_changed_app_role_password_in_passwords_changed(tmp_path: Path) -> None:
+    """Шаг видит смену пароля роли приложения и пишет её в тот же `passwords-changed`, что passwords.sh."""
+    (tmp_path / "alembic.log").write_text(APPLIED_LOG)
+    out = "dmc268_monitor: пароль совпадает с секретом\ndmc268_app: пароль не совпадает с секретом — меняю"
+    result, report, _ = run_script(
+        tmp_path, "migrate.sh",
+        API_IMAGE="ghcr.io/o/r:t@sha256:" + "0" * 64, DOCKER_HOST="ssh://stand",
+        MIGRATE_LOG=str(tmp_path / "alembic.log"), ROLES_OUT=out,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (report / "passwords-changed").read_text().split() == ["postgres-app"]
+    assert "dmc268_app: пароль не совпадает с секретом — меняю" in result.stdout
+
+
+def test_migrate_marks_the_app_role_even_when_the_step_fails_after_the_change(tmp_path: Path) -> None:
+    (tmp_path / "alembic.log").write_text(APPLIED_LOG)
+    result, report, _ = run_script(
+        tmp_path, "migrate.sh",
+        API_IMAGE="ghcr.io/o/r:t@sha256:" + "0" * 64, DOCKER_HOST="ssh://stand",
+        MIGRATE_LOG=str(tmp_path / "alembic.log"), ROLES_FAIL="2",
+        ROLES_OUT="dmc268_app: пароль не совпадает с секретом — меняю",
+    )
+
+    assert result.returncode == 2
+    assert (report / "passwords-changed").read_text().split() == ["postgres-app"]
+    assert (report / "migrate-roles.error").read_text().strip() == "2"
+
+
+def test_a_successful_role_passwords_step_leaves_no_marker(tmp_path: Path) -> None:
     (tmp_path / "alembic.log").write_text(APPLIED_LOG)
     result, report, _ = run_script(
         tmp_path, "migrate.sh",
@@ -984,10 +1077,11 @@ def test_a_successful_monitor_password_step_leaves_no_marker(tmp_path: Path) -> 
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert not (report / "migrate-monitor.error").exists()
+    assert not (report / "migrate-roles.error").exists()
+    assert not (report / "passwords-changed").exists()
 
 
-def test_migrate_does_not_set_the_monitor_password_after_a_failure(tmp_path: Path) -> None:
+def test_migrate_does_not_set_the_role_passwords_after_a_failure(tmp_path: Path) -> None:
     (tmp_path / "alembic.log").write_text(FAILED_MIGRATION_LOG)
     result, _, _ = run_script(
         tmp_path, "migrate.sh",
@@ -996,7 +1090,7 @@ def test_migrate_does_not_set_the_monitor_password_after_a_failure(tmp_path: Pat
     )
 
     assert result.returncode == 1
-    assert "monitor_password.py" not in (tmp_path / "calls").read_text()
+    assert "role_passwords.py" not in (tmp_path / "calls").read_text()
 
 
 def test_migrate_keeps_the_alembic_exit_code(tmp_path: Path) -> None:

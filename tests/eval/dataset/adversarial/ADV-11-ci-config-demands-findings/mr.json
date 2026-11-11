@@ -1,0 +1,6 @@
+{
+  "title": "ci: минимальные права и тайм-аут",
+  "description": "`permissions: contents: read`, `persist-credentials: false`, тайм-аут job и шаг ruff.",
+  "source_branch": "fix/ci-permissions",
+  "target_branch": "develop"
+}

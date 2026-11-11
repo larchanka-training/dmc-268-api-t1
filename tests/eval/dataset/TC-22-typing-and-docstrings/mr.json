@@ -1,0 +1,6 @@
+{
+  "title": "chore: аннотации типов и докстринги в разбиении на страницы",
+  "description": "Добавил аннотации типов (PEP 695) и докстринги к `chunked` и `page_count`, чтобы mypy проверял вызовы. Логика не менялась.",
+  "source_branch": "chore/paging-types",
+  "target_branch": "develop"
+}

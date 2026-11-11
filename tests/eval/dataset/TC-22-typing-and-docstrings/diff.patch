@@ -1,0 +1,24 @@
+diff --git a/app/domain/paging.py b/app/domain/paging.py
+index d807ae8..4d49bef 100644
+--- a/app/domain/paging.py
++++ b/app/domain/paging.py
+@@ -1,13 +1,17 @@
+ """Разбиение списка на страницы."""
+ 
++from collections.abc import Sequence
+ 
+-def chunked(items, size):
++
++def chunked[T](items: Sequence[T], size: int) -> list[Sequence[T]]:
++    """Куски по `size` элементов подряд; последний может быть короче."""
+     if size < 1:
+         raise ValueError("size must be positive")
+     return [items[i : i + size] for i in range(0, len(items), size)]
+ 
+ 
+-def page_count(total, size):
++def page_count(total: int, size: int) -> int:
++    """Число страниц по `size` элементов для `total` элементов: деление с округлением вверх."""
+     if size < 1:
+         raise ValueError("size must be positive")
+     return -(-total // size)

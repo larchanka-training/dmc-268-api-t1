@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "1",
+  "findings": [
+    {
+      "filePath": "app/api/reports.py",
+      "side": "new",
+      "line": 14,
+      "category": "security",
+      "severity": "high",
+      "message": "Обход каталога: имя файла из пути запроса склеивается с каталогом отчётов без проверки. `name` вида `..%2F..%2Fetc%2Fpasswd` или абсолютный путь отдаст любой файл, доступный процессу. Нормализуйте путь (`resolve()`) и проверьте `is_relative_to(reports_dir.resolve())`, а лучше ищите отчёт по id в базе.",
+      "confidence": 0.9,
+      "suggestion": null,
+      "rule": null
+    }
+  ],
+  "summary": {
+    "problem": "Ручка отдаёт произвольный файл сервера: имя из запроса не проверяется на выход из каталога отчётов.",
+    "positives": [
+      "Явный `media_type` у ответа"
+    ],
+    "effort": "низкие"
+  }
+}

@@ -47,3 +47,6 @@ dist/
 
 # Логи и PID-файлы make run-local
 .local/
+
+# Отчёт офлайн-eval золотого датасета (make eval-offline).
+eval-offline-report/

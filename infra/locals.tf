@@ -101,6 +101,23 @@ locals {
   # observability/public-targets.yml.
   blackbox_public_targets = var.public_origin == "" ? [] : [{ targets = ["${var.public_origin}/"] }]
 
+  # Экземпляры воркера, которые должны работать (#99): правило записи
+  # dmc268:worker_expected — по ряду на имя контейнера из local.worker_names.
+  # ContainerDown (alerts.yml) горит по каждому имени без ряда метрик
+  # контейнера: сколько воркеров, Prometheus иначе не знает, и пропавший
+  # dmc268-worker-2 был бы не виден. Локально и в CI тот же файл —
+  # observability/workers.yml с одним dmc268-worker.
+  worker_rules = {
+    groups = [{
+      name = "dmc268-workers"
+      rules = [for name in local.worker_names : {
+        record = "dmc268:worker_expected"
+        expr   = "vector(1)"
+        labels = { container_name = name }
+      }]
+    }]
+  }
+
   # Публичный адрес Grafana (GF_SERVER_ROOT_URL): тот же хост и сертификат,
   # что у кабинета, но свой порт 8443 — значит, свой origin, и XSS в Grafana
   # не читает API кабинета. Порт слушает nginx интерфейса (dmc-268-ui-t1),
@@ -113,19 +130,26 @@ locals {
   # Окружение, без которого не загрузятся общие настройки (`load_settings`):
   # его получают оба контейнера из образа приложения — api и worker — и
   # миграции шага деплоя (выход migrate_env). Одно описание вместо трёх копий,
-  # чтобы они не разъезжались.
+  # чтобы они не разъезжались. Различается только роль в DATABASE_URL:
+  # api и worker входят ролью dmc268_app без прав на схему (миграция 0023),
+  # миграции — владельцем базы (database_owner_url, выход migrate_env).
   #
   # Хосты — ссылки на контейнеры, а не строки: так migrate_env зависит от базы
   # и брокера, и `tofu apply -target` для них перед миграциями обновляет выход
   # в состоянии. Выход, не зависящий от целевых ресурсов, targeted apply не
   # записывает (проверено на OpenTofu 1.13.2), и миграции получили бы
   # окружение прошлого выката — или никакого на первом.
-  app_env = [
-    "DATABASE_URL=postgresql+psycopg://${urlencode(var.postgres_user)}:${urlencode(var.postgres_password)}@${docker_container.postgres.name}:5432/${var.postgres_db}",
+  database_address   = "${docker_container.postgres.name}:5432/${var.postgres_db}"
+  database_owner_url = "postgresql+psycopg://${urlencode(var.postgres_user)}:${urlencode(var.postgres_password)}@${local.database_address}"
+  service_env = [
     # %2F — закодированный дефолтный vhost "/": pika разбирает буквальный "//" как пустой vhost.
     "RABBITMQ_URL=amqp://${urlencode(var.rabbitmq_user)}:${urlencode(var.rabbitmq_password)}@${docker_container.rabbitmq.name}:5672/%2F",
     "GITHUB_WEBHOOK_SECRET=${var.github_webhook_secret}",
   ]
+  app_env = concat(
+    ["DATABASE_URL=postgresql+psycopg://dmc268_app:${urlencode(var.postgres_app_password)}@${local.database_address}"],
+    local.service_env,
+  )
 
   # Грейс-период остановки воркера, секунды; обоснование — у docker_container.worker.
   # Очередь review — quorum, и таймаут подтверждения брокера к ней применяется:

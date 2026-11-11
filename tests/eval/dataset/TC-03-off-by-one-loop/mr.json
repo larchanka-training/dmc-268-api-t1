@@ -1,0 +1,6 @@
+{
+  "title": "feat: разбиение списка находок на страницы",
+  "description": "Добавляет `paginate`: режет список на страницы заданного размера для постраничной выдачи в сводке.",
+  "source_branch": "feat/paginate-findings",
+  "target_branch": "develop"
+}

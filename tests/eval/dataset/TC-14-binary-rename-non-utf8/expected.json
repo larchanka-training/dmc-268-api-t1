@@ -1,0 +1,18 @@
+{
+  "case_id": "TC-14-binary-rename-non-utf8",
+  "kind": "robustness",
+  "expected_findings": [
+    {
+      "id": "export-skips-first-row",
+      "file_path": "app/reports/export_csv.py",
+      "side": "new",
+      "line": 16,
+      "category": "correctness",
+      "severity": "medium",
+      "must_find": true
+    }
+  ],
+  "forbidden_categories": [],
+  "max_findings": 3,
+  "injection": null
+}

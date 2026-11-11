@@ -1,0 +1,6 @@
+{
+  "title": "fix: прогон не падает, когда биллинг недоступен",
+  "description": "Если сервис биллинга не ответил, прогон больше не падает с 500: лимиты берутся по умолчанию.",
+  "source_branch": "fix/billing-unavailable",
+  "target_branch": "develop"
+}

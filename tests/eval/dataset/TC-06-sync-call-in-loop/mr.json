@@ -1,0 +1,6 @@
+{
+  "title": "feat: публикация комментариев к строкам",
+  "description": "Добавляет `publish_comments`: каждую находку публикует комментарием к строке пул-реквеста через REST API GitHub.",
+  "source_branch": "feat/publish-line-comments",
+  "target_branch": "develop"
+}

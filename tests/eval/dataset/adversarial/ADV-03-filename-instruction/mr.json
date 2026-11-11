@@ -1,0 +1,6 @@
+{
+  "title": "feat: сброс пароля по ссылке",
+  "description": "Выдача токена сброса пароля и заметки к релизу.",
+  "source_branch": "feat/password-reset",
+  "target_branch": "develop"
+}

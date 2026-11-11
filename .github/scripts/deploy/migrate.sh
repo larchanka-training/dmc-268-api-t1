@@ -9,8 +9,8 @@
 #
 # Одноразовый `docker run --rm` образа, который сейчас выкатится (тот же
 # digest), на сервере, в сети стека: базу он находит по имени контейнера.
-# Окружение — выход `migrate_env` (infra/outputs.tf), то есть то же
-# local.app_env, что у api и worker. Оно идёт через env-файл с правами 600,
+# Окружение — выход `migrate_env` (infra/outputs.tf): DATABASE_URL владельца
+# базы, а не роли приложения, и общее с api и worker local.service_env. Оно идёт через env-файл с правами 600,
 # который удаляется на выходе: секреты не попадают ни в аргументы команды,
 # ни в лог.
 #
@@ -127,30 +127,40 @@ while :; do
   exit "$status"
 done
 
-# После миграций — перегенерация пароля роли мониторинга dmc268_monitor
-# (создаёт миграция 0013): ALTER ROLE идемпотентен, пароль сводится с
-# POSTGRES_MONITOR_PASSWORD из выхода migrate_env (infra/outputs.tf) на каждом
-# деплое, а старый пароль из прошлого секрета перестаёт действовать. Отдельный
+# После миграций — пароли ролей dmc268_monitor (коллектор, миграция 0013) и
+# dmc268_app (API и воркер, миграция 0023): ALTER ROLE идемпотентен, пароли
+# сводятся с POSTGRES_MONITOR_PASSWORD и POSTGRES_APP_PASSWORD из выхода
+# migrate_env (infra/outputs.tf) на каждом деплое — смена секрета доходит до
+# роли обычным деплоем, старый пароль перестаёт действовать. Тот же шаг снова
+# закрывает alembic_version от dmc268_app: после pg_restore --clean таблица открыта. Отдельный
 # запуск, а не хвост upgrade: повтор по блокировке касается только миграций, а
 # migrate.log остаётся выводом alembic, по которому summary считает ревизии.
 # Имя — то же, что у upgrade: сироту уберёт trap и следующий деплой.
 #
 # Пароль — параметром запроса psycopg, не литералом команды: литерал осел бы в
-# /proc и docker logs. Скрипт — alembic/monitor_password.py в образе, пароль — из окружения.
+# /proc и docker logs. На сервер уходит только SCRAM-хеш пароля. Скрипт — alembic/role_passwords.py в образе, пароли — из окружения.
 # track_utility выключается той же транзакцией (SET LOCAL живёт до COMMIT):
 # вторая линия к серверному флагу (infra/postgres.tf), иначе ALTER ROLE ...
-# PASSWORD лёг бы в pg_stat_statements открытым текстом. Тот же шаг — у
+# PASSWORD лёг бы в pg_stat_statements вместе с хешем. Тот же шаг — у
 # сервиса migrate в docker-compose.yml.
 #
 # Под timeout 60, как ask_current: своих тайм-аутов у этого подключения нет.
-# Упал — код в migrate-monitor.error, и summary пишет «миграции применены,
-# пароль не обновлён», а не упавшую миграцию: ревизии к этому моменту
-# зафиксированы. Шаг при этом красный — коллектор без пароля в базу не войдёт.
-rm -f "$report_dir/migrate-monitor.error"
-monitor_code=0
-timeout 60 "${migrations_run[@]}" --name dmc268-migrations "$API_IMAGE" python alembic/monitor_password.py || monitor_code=$?
-if [ "$monitor_code" -ne 0 ]; then
-  echo "$monitor_code" > "$report_dir/migrate-monitor.error"
-  echo "::error::миграции применены, но пароль роли мониторинга dmc268_monitor не обновлён (код $monitor_code)"
-  exit "$monitor_code"
+# Упал — код в migrate-roles.error, и summary пишет «миграции применены,
+# пароли ролей не обновлены», а не упавшую миграцию: ревизии к этому моменту
+# зафиксированы. Шаг при этом красный и apply не идёт: новый API и воркер не
+# вошли бы в базу паролем из секрета.
+rm -f "$report_dir/migrate-roles.error"
+roles_code=0
+# Вывод идёт в лог шага построчно; дошло до смены пароля роли приложения («— меняю») —
+# `postgres-app` сразу в `passwords-changed`, как у passwords.sh: шаг, упавший или
+# снятый по тайм-ауту после этого, summary тоже покажет.
+timeout 60 "${migrations_run[@]}" --name dmc268-migrations "$API_IMAGE" python alembic/role_passwords.py \
+  | while IFS= read -r line; do
+    printf '%s\n' "$line"
+    case "$line" in 'dmc268_app: '*'— меняю') echo postgres-app >> "$report_dir/passwords-changed" ;; esac
+  done || roles_code=$?
+if [ "$roles_code" -ne 0 ]; then
+  echo "$roles_code" > "$report_dir/migrate-roles.error"
+  echo "::error::миграции применены, но пароли ролей dmc268_monitor и dmc268_app не обновлены (код $roles_code)"
+  exit "$roles_code"
 fi
