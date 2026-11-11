@@ -89,8 +89,14 @@ def test_circuit_breaker_rules_read_the_worker_gauge() -> None:
     """#294: алерт и глушение зависаний читают gauge, который пишет воркер."""
     metric = "review_circuit_breaker_state"
     assert f'"{metric}"' in (REPO / "app" / "infrastructure" / "telemetry.py").read_text(encoding="utf-8")
-    for name in ("ProviderCircuitOpen", "WorkerStalled", "ReviewJobStuck"):
+    for name in ("ProviderCircuitOpen", "LlmProviderCircuitOpen", "WorkerStalled", "ReviewJobStuck"):
         assert metric in _alerts()[name]["expr"], name
+    # Провайдер с живым фоллбэком — warning со своим service: critical воркера его не глушит.
+    assert _alerts()["LlmProviderCircuitOpen"]["labels"] == {"severity": "warning", "service": "llm-provider"}
+    # Зависание глушится тем же условием, что откладывает прогоны (`deferral`), а не любым breaker'ом.
+    deferring = 'min(review_circuit_breaker_state{provider!="GitHub"}) > 0'
+    assert deferring in _alerts()["WorkerStalled"]["expr"]
+    assert deferring in _alerts()["ReviewJobStuck"]["expr"]
 
 
 def test_backup_mark_matches_the_rule() -> None:

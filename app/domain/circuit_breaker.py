@@ -43,6 +43,7 @@ class Breaker:
     open_until: float | None = None
 
 
+# Провайдер ответил — каким угодно ответом, хоть 4xx: он жив, breaker замкнут и счёт обнулён.
 CLOSED = Breaker()
 
 
@@ -57,11 +58,6 @@ def retry_after(breaker: Breaker, now: float) -> float | None:
     if breaker.open_until is None or now >= breaker.open_until:
         return None
     return breaker.open_until - now
-
-
-def answered(breaker: Breaker) -> Breaker:
-    """Провайдер ответил — каким угодно ответом, хоть 4xx: он жив, breaker замыкается."""
-    return CLOSED
 
 
 def failed(breaker: Breaker, policy: BreakerPolicy, now: float) -> Breaker:

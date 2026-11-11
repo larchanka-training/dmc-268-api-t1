@@ -677,7 +677,8 @@ nginx интерфейса подключается так же в `dmc-268-ui-t
 | `StripeWebhookFailing` | доля 4xx и 5xx среди ответов `POST /api/v1/webhooks/stripe` за 6 часов; первый отказ с кодом, ряда которого в окне ещё не было, `increase()` не видит, а отказ с уже бывшим кодом виден сразу: один такой без принятых доставок зажигает алерт | > 50 % | warning |
 | `ReviewRunsRefused` | доля отказов по балансу (`refused`) среди исходов прогонов за час, при 3+ отказах | > 50 % | warning |
 | `ReviewDlqNotEmpty` | сообщения в `review_jobs.dlq` | > 0 дольше 5 минут | critical |
-| `ProviderCircuitOpen` | breaker провайдера (`review_circuit_breaker_state{provider}`: GitHub, Ollama, Eurorouter) не замкнут — разомкнут или ждёт пробы, — а в `review_jobs.qq` есть задачи; пока он горит, `WorkerStalled` и `ReviewJobStuck` молчат: отложенные прогоны не подтверждаются | 15 минут | critical |
+| `ProviderCircuitOpen` | прогоны откладываются: breaker GitHub или всех провайдеров модели (`review_circuit_breaker_state{provider}`) не замкнут — разомкнут или ждёт пробы, — а в `review_jobs.qq` есть задачи; пока он горит, `WorkerStalled` и `ReviewJobStuck` молчат: отложенные прогоны не подтверждаются | 15 минут | critical |
+| `LlmProviderCircuitOpen` | breaker одного провайдера модели не замкнут, а другой отвечает: прогоны идут через фоллбэк (при Ollama код уходит Eurorouter); задачи в очереди есть | 15 минут | warning |
 | `LlmBudgetNearLimit` | токены модели с начала месяца (UTC) от бюджета `dmc268:llm_tokens_budget_month` — 50 млн | > 80 % | warning |
 | `LlmBudgetExceeded` | то же | ≥ 100 % | critical |
 | `LlmBudgetUnknown` | ряда расхода токенов нет — алерт бюджета слеп | 15 минут | warning |

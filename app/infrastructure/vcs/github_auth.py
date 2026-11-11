@@ -62,6 +62,14 @@ class GitHubAppAuth:
                 f"GitHub недоступен при запросе installation token"
                 f" для {installation_id}: {error}"
             ) from error
+        if response.is_server_error:
+            # 5xx — GitHub не ответил, ключ тут ни при чём: отказ для breaker'а (#294), а не
+            # SCM_AUTH_ERROR. Иначе в долгом сбое с истёкшим кэшем токенов прогоны падали бы
+            # с auth вместо отложенного ожидания.
+            raise VcsOutageError(
+                "GitHub не выдал installation token"
+                f" для {installation_id}: HTTP {response.status_code}"
+            )
         if response.is_error:
             raise VcsAuthError(
                 "GitHub не выдал installation token"

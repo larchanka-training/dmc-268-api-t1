@@ -176,7 +176,7 @@ class Stack:
         messages: int,
         *,
         timeout: float = WORK_TIMEOUT_SECONDS,
-        paused_for: Callable[[], float | None] | None = None,
+        paused_for: Callable[[], float | None] = lambda: None,
         max_defer: float = 0.0,
     ) -> None:
         """Воркер обрабатывает `messages` сообщений из очереди и останавливается.

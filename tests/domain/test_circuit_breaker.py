@@ -7,7 +7,6 @@ from app.domain.circuit_breaker import (
     Breaker,
     BreakerPolicy,
     BreakerState,
-    answered,
     failed,
     retry_after,
     state,
@@ -38,25 +37,11 @@ def test_the_threshold_opens_it_for_the_pause() -> None:
     assert retry_after(breaker, 130.0) == 30.0
 
 
-def test_an_answer_resets_the_count() -> None:
-    """Отказы считаются подряд: ответ между ними обнуляет счёт."""
-    breaker = _fail(answered(_fail(CLOSED, 2, now=0.0)), 2, now=0.0)
-
-    assert state(breaker, 0.0) is BreakerState.CLOSED
-
-
 def test_after_the_pause_it_is_half_open_and_lets_a_call_through() -> None:
     breaker = _fail(CLOSED, 3, now=100.0)
 
     assert state(breaker, 160.0) is BreakerState.HALF_OPEN
     assert retry_after(breaker, 160.0) is None
-
-
-def test_an_answer_in_half_open_closes_it() -> None:
-    breaker = answered(_fail(CLOSED, 3, now=100.0))
-
-    assert breaker == CLOSED
-    assert state(breaker, 160.0) is BreakerState.CLOSED
 
 
 def test_a_failed_probe_reopens_it_with_a_doubled_pause() -> None:

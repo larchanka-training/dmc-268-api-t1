@@ -39,7 +39,7 @@ class CircuitBreaker:
     def record_answer(self) -> None:
         with self._lock:
             was_open = self._state.open_until is not None
-            self._state = breaker.answered(self._state)
+            self._state = breaker.CLOSED
         if was_open:
             logger.info("breaker %s замкнут: провайдер ответил", self.provider, extra={"provider": self.provider})
 

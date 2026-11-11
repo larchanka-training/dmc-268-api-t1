@@ -13,8 +13,9 @@
 - Провайдер модели на паузе фоллбэк пропускает без вызова. GitHub или все провайдеры модели на
   паузе — прогон не захватывается, а откладывается: сообщение возвращается `nack` с requeue
   через время до пробы (не дольше минуты), попытка доставки не тратится.
-- Gauge `review_circuit_breaker_state{provider}`, алерт `ProviderCircuitOpen`; `WorkerStalled` и
-  `ReviewJobStuck` при не замкнутом breaker'е молчат.
+- Gauge `review_circuit_breaker_state{provider}`, алерты `ProviderCircuitOpen` (critical, прогоны
+  откладываются) и `LlmProviderCircuitOpen` (warning, живой фоллбэк); `WorkerStalled` и
+  `ReviewJobStuck` молчат, только пока прогоны откладываются.
 
 ## Capabilities
 

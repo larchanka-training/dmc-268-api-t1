@@ -667,8 +667,8 @@ Access-запись uvicorn о запросе health-check'а SHALL NOT попа
 Алерт SHALL гореть, когда у `review_jobs.qq` есть потребитель и готовые задачи, но 15 минут нет
 подтверждений (`WorkerStalled`); когда сообщение выдано и 20 минут не подтверждено
 (`ReviewJobStuck`); когда память контейнера `dmc268-*` 10 минут выше 90 % лимита
-(`ContainerMemoryNearLimit`). Поток коротких прогонов, очередь без потребителя и не замкнутый
-breaker провайдера SHALL NOT зажигать первые два.
+(`ContainerMemoryNearLimit`). Поток коротких прогонов, очередь без потребителя и отложенные
+прогоны (не замкнут breaker GitHub или всех провайдеров модели) SHALL NOT зажигать первые два.
 
 #### Scenario: Воркер завис на задаче
 
@@ -692,8 +692,13 @@ breaker провайдера SHALL NOT зажигать первые два.
 
 #### Scenario: Провайдер на паузе
 
-- **WHEN** breaker провайдера не замкнут, прогоны откладываются, и 20 минут нет подтверждений
+- **WHEN** breaker GitHub не замкнут, прогоны откладываются, и 20 минут нет подтверждений
 - **THEN** `WorkerStalled` и `ReviewJobStuck` молчат, горит `ProviderCircuitOpen`
+
+#### Scenario: Воркер завис при живом фоллбэке
+
+- **WHEN** breaker Ollama разомкнут, Eurorouter замкнут, а воркер 20 минут не подтверждает задачу
+- **THEN** горят `WorkerStalled` и `ReviewJobStuck`
 
 #### Scenario: Память у потолка
 
@@ -954,15 +959,20 @@ SHALL NOT попадать в запись. Спан httpx ответа с `x-re
 
 ### Requirement: Состояние breaker'а провайдера
 
-Воркер SHALL отдавать gauge `review_circuit_breaker_state` с меткой `provider` (`GitHub`, `Ollama`,
-`Eurorouter`): 0 — замкнут, 1 — пауза вышла и ждёт пробы, 2 — разомкнут. Breaker не замкнут 15
-минут при задачах в `review_jobs.qq` — SHALL гореть `ProviderCircuitOpen` (critical) с меткой
-провайдера; без задач SHALL NOT.
+Воркер SHALL отдавать gauge `review_circuit_breaker_state{provider}`: 0 замкнут, 1 ждёт пробы, 2
+разомкнут. При задачах в `review_jobs.qq` 15 минут не замкнут breaker GitHub или всех провайдеров
+модели — SHALL гореть `ProviderCircuitOpen` (critical); одного провайдера модели при живом
+фоллбэке — `LlmProviderCircuitOpen` (warning). Без задач оба SHALL NOT гореть.
 
 #### Scenario: Долгий отказ GitHub
 
 - **WHEN** breaker GitHub 15 минут разомкнут или ждёт пробы, а в очереди задачи
 - **THEN** горит `ProviderCircuitOpen` с `provider="GitHub"`
+
+#### Scenario: Лежит один провайдер модели из двух
+
+- **WHEN** breaker Ollama 15 минут разомкнут, Eurorouter замкнут, в очереди задачи
+- **THEN** горит warning `LlmProviderCircuitOpen` с `provider="Ollama"`, а `ProviderCircuitOpen` молчит
 
 #### Scenario: Ночной сбой без трафика
 

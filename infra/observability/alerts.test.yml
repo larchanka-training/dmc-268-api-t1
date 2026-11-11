@@ -550,7 +550,7 @@ tests:
               service: worker
               provider: GitHub
             exp_annotations:
-              summary: "Breaker GitHub не замкнут 15 минут"
+              summary: "Breaker GitHub не замкнут 15 минут, прогоны ждут"
               description: "Провайдер GitHub не отвечает: сеть, таймаут или 5xx. Прогоны ждут в очереди без траты попыток доставки и пойдут сами после удачного пробного вызова (пауза от минуты до 10). Причина — в логах воркера («breaker … разомкнут») и спанах HTTP-клиента; статус GitHub — githubstatus.com."
       - eval_time: 39m
         alertname: ProviderCircuitOpen
@@ -561,9 +561,13 @@ tests:
       - eval_time: 39m
         alertname: ReviewJobStuck
         exp_alerts: []
+      - eval_time: 39m
+        alertname: LlmProviderCircuitOpen
+        exp_alerts: []
 
-  # Ночной сбой: breaker разомкнулся и ждёт пробы, а задач нет — пробовать нечем и
-  # ждать некому, алерт молчит. Пришла задача (30-я минута) — через 15 минут горит.
+  # Ночной сбой: breaker единственного провайдера модели разомкнулся и ждёт пробы,
+  # а задач нет — пробовать нечем и ждать некому, алерт молчит. Пришла задача
+  # (30-я минута) — через 15 минут горит critical: фоллбэка нет, прогоны ждут.
   - interval: 1m
     input_series:
       - series: 'review_circuit_breaker_state{job="dmc-268-worker", provider="Eurorouter"}'
@@ -585,8 +589,51 @@ tests:
               service: worker
               provider: Eurorouter
             exp_annotations:
-              summary: "Breaker Eurorouter не замкнут 15 минут"
+              summary: "Breaker Eurorouter не замкнут 15 минут, прогоны ждут"
               description: "Провайдер Eurorouter не отвечает: сеть, таймаут или 5xx. Прогоны ждут в очереди без траты попыток доставки и пойдут сами после удачного пробного вызова (пауза от минуты до 10). Причина — в логах воркера («breaker … разомкнут») и спанах HTTP-клиента; статус GitHub — githubstatus.com."
+
+  # Ollama лежит, Eurorouter отвечает (#294): прогоны идут через фоллбэк — горит
+  # warning LlmProviderCircuitOpen, а не critical. Воркер при этом завис на задаче:
+  # WorkerStalled и ReviewJobStuck горят — не замкнутый breaker одного провайдера
+  # из двух их не глушит.
+  - interval: 1m
+    input_series:
+      - series: 'review_circuit_breaker_state{job="dmc-268-worker", provider="GitHub"}'
+        values: "0x40"
+      - series: 'review_circuit_breaker_state{job="dmc-268-worker", provider="Ollama"}'
+        values: "2x40"
+      - series: 'review_circuit_breaker_state{job="dmc-268-worker", provider="Eurorouter"}'
+        values: "0x40"
+      - series: 'rabbitmq_queue_messages{queue="review_jobs.qq"}'
+        values: "0x4 3x36"
+      - series: 'rabbitmq_queue_messages_ready{queue="review_jobs.qq"}'
+        values: "0x5 2x35"
+      - series: 'rabbitmq_queue_messages_unacked{queue="review_jobs.qq"}'
+        values: "0x4 1x36"
+      - series: 'rabbitmq_queue_consumers{queue="review_jobs.qq"}'
+        values: "1x40"
+      - series: 'rabbitmq_global_messages_acknowledged_total{protocol="amqp091", queue_type="rabbit_quorum_queue"}'
+        values: "80x40"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: LlmProviderCircuitOpen
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: llm-provider
+              provider: Ollama
+            exp_annotations:
+              summary: "Breaker Ollama не замкнут 15 минут, прогоны идут через фоллбэк"
+              description: "Провайдер модели Ollama не отвечает: сеть, таймаут или 5xx. Прогоны идут через второго провайдера фоллбэка; при Ollama код проверяемых репозиториев уходит Eurorouter. Причина — в логах воркера («breaker … разомкнут»)."
+      - eval_time: 25m
+        alertname: ProviderCircuitOpen
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: WorkerStalled
+        exp_alerts: *worker_stalled
+      - eval_time: 25m
+        alertname: ReviewJobStuck
+        exp_alerts: *review_job_stuck
 
   # Поток прогонов подряд: очередь не пустеет, сообщение в работе всегда,
   # но задачи подтверждаются раз в 2 минуты; после рестарта брокера счётчик

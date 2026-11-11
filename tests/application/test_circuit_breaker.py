@@ -41,6 +41,16 @@ def test_it_opens_on_the_threshold_and_half_opens_after_the_pause() -> None:
     assert breaker.state() is BreakerState.CLOSED
 
 
+def test_an_answer_between_failures_resets_the_count() -> None:
+    """Отказы считаются подряд: ответ между ними обнуляет счёт (порог 2)."""
+    breaker = _breaker(Clock())
+    breaker.record_failure()
+    breaker.record_answer()
+    breaker.record_failure()
+
+    assert breaker.state() is BreakerState.CLOSED
+
+
 def test_opening_and_closing_are_logged_with_the_provider(caplog: pytest.LogCaptureFixture) -> None:
     clock = Clock()
     with caplog.at_level(logging.INFO, logger="app.application.circuit_breaker"):

@@ -152,14 +152,16 @@ groups:
       # брокера обнуляет счётчик, increase() это переносит; рядов нет (брокер
       # не снимается), и алерт молчит, а горит ScrapeTargetDown. Окно без for:
       # for поверх окна удвоил бы срок до 30 минут, когда прогон уже выметен.
-      # Breaker провайдера не замкнут — воркер не завис, а откладывает прогоны
-      # без подтверждений (#294): горит ProviderCircuitOpen, этот молчит.
+      # Воркер откладывает прогоны (#294) — breaker GitHub или всех провайдеров
+      # модели не замкнут, как в `deferral`: подтверждений нет, но воркер не завис,
+      # горит ProviderCircuitOpen. Лежит один провайдер модели при живом фоллбэке —
+      # прогоны идут, и зависание по-прежнему видно.
       - alert: WorkerStalled
         expr: |
           min_over_time(rabbitmq_queue_messages_ready{queue="review_jobs.qq"}[15m]) > 0
           and on() rabbitmq_queue_consumers{queue="review_jobs.qq"} > 0
           and on() sum(increase(rabbitmq_global_messages_acknowledged_total{queue_type="rabbit_quorum_queue"}[15m])) == 0
-          unless on() max(review_circuit_breaker_state) > 0
+          unless on() (max(review_circuit_breaker_state{provider="GitHub"}) > 0 or min(review_circuit_breaker_state{provider!="GitHub"}) > 0)
         labels:
           severity: critical
           service: worker
@@ -177,12 +179,13 @@ groups:
       # задача висит, не идёт ни одно ревью; warning же глушил бы любой
       # critical воркера, в том числе ReviewDlqNotEmpty, который горит до
       # ручного разбора DLQ. Отложенное сообщение (#294) воркер держит до минуты
-      # и возвращает без подтверждения — при не замкнутом breaker'е алерт молчит.
+      # и возвращает без подтверждения — пока прогоны откладываются, алерт молчит
+      # (условие то же, что у WorkerStalled).
       - alert: ReviewJobStuck
         expr: |
           min_over_time(rabbitmq_queue_messages_unacked{queue="review_jobs.qq"}[20m]) > 0
           and on() sum(increase(rabbitmq_global_messages_acknowledged_total{queue_type="rabbit_quorum_queue"}[20m])) == 0
-          unless on() max(review_circuit_breaker_state) > 0
+          unless on() (max(review_circuit_breaker_state{provider="GitHub"}) > 0 or min(review_circuit_breaker_state{provider!="GitHub"}) > 0)
         labels:
           severity: critical
           service: worker
@@ -190,23 +193,47 @@ groups:
           summary: "Задача review_jobs.qq в работе дольше 20 минут"
           description: "Сообщение выдано воркеру 20 минут назад и не подтверждено. Сначала проверить, не идут ли вызовы модели в таймаут с повтором (спаны review.<этап>, шаг прогона: GET /api/v1/reviews/{id}/steps): такой прогон дойдёт сам. Через 30 минут без прогресса прогон переведёт в failed выметатель."
 
-      # Breaker провайдера (#294) 15 минут не замкнут — разомкнут или ждёт пробы, — а в
-      # очереди есть задачи: прогоны откладываются (GitHub или все провайдеры модели)
-      # или идут мимо провайдера (Ollama при фоллбэке на Eurorouter). Gauge воркера
-      # review_circuit_breaker_state: 0 замкнут, 1 ждёт пробы, 2 разомкнут; между
-      # пробами он скачет 2 → 1 → 2 и не падает в 0. Пустая очередь — пробы нет и ждать
-      # некому: алерт молчит, а не горит до утра после ночного сбоя.
+      # Прогоны откладываются 15 минут (#294): breaker GitHub или всех провайдеров
+      # модели не замкнут — разомкнут или ждёт пробы, — а в очереди есть задачи.
+      # Gauge воркера review_circuit_breaker_state: 0 замкнут, 1 ждёт пробы, 2
+      # разомкнут; между пробами он скачет 2 → 1 → 2 и не падает в 0. Пустая очередь —
+      # пробы нет и ждать некому: алерт молчит, а не горит до утра после ночного сбоя.
       - alert: ProviderCircuitOpen
         expr: |
-          max by (provider) (review_circuit_breaker_state) > 0
+          (
+            max by (provider) (review_circuit_breaker_state{provider="GitHub"}) > 0
+            or (
+              max by (provider) (review_circuit_breaker_state{provider!="GitHub"}) > 0
+              and on() min(review_circuit_breaker_state{provider!="GitHub"}) > 0
+            )
+          )
           and on() sum(rabbitmq_queue_messages{queue="review_jobs.qq"}) > 0
         for: 15m
         labels:
           severity: critical
           service: worker
         annotations:
-          summary: "Breaker {{ $labels.provider }} не замкнут 15 минут"
+          summary: "Breaker {{ $labels.provider }} не замкнут 15 минут, прогоны ждут"
           description: "Провайдер {{ $labels.provider }} не отвечает: сеть, таймаут или 5xx. Прогоны ждут в очереди без траты попыток доставки и пойдут сами после удачного пробного вызова (пауза от минуты до 10). Причина — в логах воркера («breaker … разомкнут») и спанах HTTP-клиента; статус GitHub — githubstatus.com."
+
+      # Один провайдер модели лежит, другой отвечает: прогоны идут через фоллбэк,
+      # сервис жив — warning, а не critical. Для Ollama это ещё и сигнал, что код
+      # проверяемых репозиториев уходит hosted-провайдеру. Свой service: critical
+      # воркера (ReviewRunsFailing) не глушит его через inhibit_rules.
+      - alert: LlmProviderCircuitOpen
+        expr: |
+          (
+            max by (provider) (review_circuit_breaker_state{provider!="GitHub"}) > 0
+            unless on() min(review_circuit_breaker_state{provider!="GitHub"}) > 0
+          )
+          and on() sum(rabbitmq_queue_messages{queue="review_jobs.qq"}) > 0
+        for: 15m
+        labels:
+          severity: warning
+          service: llm-provider
+        annotations:
+          summary: "Breaker {{ $labels.provider }} не замкнут 15 минут, прогоны идут через фоллбэк"
+          description: "Провайдер модели {{ $labels.provider }} не отвечает: сеть, таймаут или 5xx. Прогоны идут через второго провайдера фоллбэка; при Ollama код проверяемых репозиториев уходит Eurorouter. Причина — в логах воркера («breaker … разомкнут»)."
 
       # Скрейп цели падает: метрики этой цели, а с ними и алерты по ним, молчат.
       - alert: ScrapeTargetDown

@@ -413,7 +413,7 @@ def build_review_handler(
     *,
     run_outcome: RunOutcomeRecorder = NO_RUN_OUTCOME,
     billing_enabled: bool = False,
-    paused_for: Callable[[], float | None] | None = None,
+    paused_for: Callable[[], float | None] = lambda: None,
 ) -> MessageHandler:
     """Собрать обработчик сообщения: разбор + `run_review`.
 
@@ -425,10 +425,9 @@ def build_review_handler(
     считается на фактическом терминальном переходе, который делает пайплайн.
 
     `paused_for` — сколько ждать провайдеров на паузе breaker'а (`deferral`, #294);
-    `None` — без breaker'ов, прогон не откладывается.
+    по умолчанию — без breaker'ов, прогон не откладывается.
     """
     stage_tracer = OtelStageTracer()
-    pause_check = paused_for if paused_for is not None else _never_paused
 
     def handle(body: bytes) -> None:
         job = from_wire_message(body)
@@ -454,7 +453,7 @@ def build_review_handler(
                     stage_tracer=stage_tracer,
                     run_outcome=run_outcome,
                     billing_enabled=billing_enabled,
-                    paused_for=pause_check,
+                    paused_for=paused_for,
                 )
             except ReviewDeferred:
                 # Не сбой: прогон не захвачен, решение и запись — у consume-цикла.
@@ -467,10 +466,6 @@ def build_review_handler(
                 raise
 
     return handle
-
-
-def _never_paused() -> float | None:
-    return None
 
 
 class WorkerConfigError(RuntimeError):

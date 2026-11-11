@@ -106,10 +106,6 @@ class ReviewDeferred(Exception):
         self.retry_after = retry_after
 
 
-def _never_paused() -> float | None:
-    return None
-
-
 def _claim(uow: UnitOfWork, run: ReviewRun, now: datetime) -> ReviewRun | None:
     """Захватить прогон из `queued`; `None` — его уже изменил кто-то другой."""
     claimed = advance(run, ReviewRunStatus.BUILDING_CONTEXT, now).unwrap()
@@ -350,7 +346,7 @@ def run_review(
     stage_tracer: StageTracer = NO_STAGE_TRACING,
     run_outcome: RunOutcomeRecorder = NO_RUN_OUTCOME,
     billing_enabled: bool = False,
-    paused_for: Callable[[], float | None] = _never_paused,
+    paused_for: Callable[[], float | None] = lambda: None,
 ) -> None:
     """Довести прогон до терминального состояния.
 

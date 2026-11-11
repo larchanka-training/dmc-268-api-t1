@@ -1067,3 +1067,21 @@ def test_failures_count_in_a_row_across_requests(rsa_key_pair: RsaKeyPair) -> No
     with pytest.raises(VcsUnavailableError, match="паузе"):
         _metadata(gateway)
     assert len(seen) == 6
+
+
+def test_503_on_the_installation_token_opens_the_breaker(rsa_key_pair: RsaKeyPair) -> None:
+    """Кэш токенов истёк, а GitHub лежит: отказ выдачи токена размыкает breaker, следующий
+    запрос не уходит — прогон отложится, а не упадёт с `SCM_AUTH_ERROR`."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(503, json={"message": "Service Unavailable"})
+
+    gateway = _guarded(rsa_key_pair, handler, _Clock())
+
+    with pytest.raises(VcsOutageError):
+        _metadata(gateway)
+    with pytest.raises(VcsUnavailableError, match="паузе"):
+        _metadata(gateway)
+    assert [r.url.path for r in seen] == [f"/app/installations/{INSTALLATION_ID}/access_tokens"]

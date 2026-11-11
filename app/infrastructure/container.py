@@ -340,9 +340,6 @@ class Container:
         """Статус сервиса для публичной страницы — с кэшем оценки, один на процесс."""
         return self._service_status
 
-    def breakers(self) -> ProviderBreakers | None:
-        return self._breakers
-
     def run_outcome(self) -> RunOutcomeRecorder:
         """Счётчик терминальных исходов прогонов — адаптер телеметрии.
 
