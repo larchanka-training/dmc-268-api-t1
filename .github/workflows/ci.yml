@@ -315,12 +315,13 @@ jobs:
             "$OTELCOL" validate --config=/etc/otelcol-contrib/config.yaml
       # check config проверяет и правила из rule_files, поэтому они смонтированы
       # по тому же пути, что на стенде; цель пробы публичного входа — локальный
-      # пустой список.
+      # пустой список, экземпляры воркера — локальный workers.yml.
       - name: Prometheus (promtool check config)
         run: |
           docker run --rm --entrypoint promtool \
             -v "$PWD/infra/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
             -v "$PWD/infra/observability/alerts.yml:/etc/prometheus/alerts.yml:ro" \
+            -v "$PWD/infra/observability/workers.yml:/etc/prometheus/workers.yml:ro" \
             -v "$PWD/infra/observability/public-targets.yml:/etc/prometheus/targets/public.yml:ro" \
             "$PROM" check config /etc/prometheus/prometheus.yml
       # Поведение алертов #100 — синтетические ряды «горит / молчит» на каждый

@@ -836,7 +836,7 @@ def test_scripts_called_from_the_workflow_are_executable() -> None:
 
 
 def test_state_commands_wait_for_a_short_foreign_lock() -> None:
-    """Каждый plan и apply деплоя ждёт чужую короткую блокировку, а не падает сразу.
+    """Каждый plan, apply и state mv деплоя ждёт чужую короткую блокировку, а не падает сразу.
 
     Шаг «Поднять базу и брокер» зовёт infra.sh (#220): его plan и apply
     сверяются так же, как у plan.sh и apply.sh, — все команды, с продолжениями
@@ -844,10 +844,12 @@ def test_state_commands_wait_for_a_short_foreign_lock() -> None:
     """
     infra = next(s for s in deploy_steps() if s["id"] == "infra")
     assert str(infra["run"]).strip().splitlines()[-1] == ".github/scripts/deploy/infra.sh"
-    expected = {"infra.sh": {"plan", "apply"}, "plan.sh": {"plan"}, "apply.sh": {"apply"}}
+    expected = {"infra.sh": {"plan", "apply", "state mv"}, "plan.sh": {"plan"}, "apply.sh": {"apply"}}
     for script, verbs in expected.items():
         text = (SCRIPTS / "deploy" / script).read_text()
-        commands = re.findall(r"^tofu -chdir=infra (plan|apply)\b((?:[^\n]*\\\n)*[^\n]*)$", text, re.MULTILINE)
+        commands = re.findall(
+            r"^\s*tofu -chdir=infra (plan|apply|state mv)\b((?:[^\n]*\\\n)*[^\n]*)$", text, re.MULTILINE
+        )
         assert {verb for verb, _ in commands} == verbs, (script, commands)
         for verb, rest in commands:
             assert "-lock-timeout=2m" in rest, (script, verb)

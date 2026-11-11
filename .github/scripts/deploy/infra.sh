@@ -42,6 +42,20 @@ trap 'rm -f infra/infra.tfplan' EXIT
 # -lock-timeout: чужая короткая блокировка того же ключа (ручной plan) не роняет
 # деплой сразу — он ждёт её до двух минут, как plan.sh и apply.sh (#215).
 tofu -chdir=infra init -input=false -no-color
+
+# Воркер до #99 жил в состоянии по адресу без ключа, теперь он — первый
+# экземпляр for_each. Блок moved в infra/app.tf перенёс бы адрес полным
+# планом, но targeted-план ниже с непроведённым переносом OpenTofu не строит
+# («Moved resource instances excluded by targeting»), а -target воркера
+# пересоздал бы его новым образом раньше миграций. Поэтому перенос — здесь, до
+# плана, и только пока старый адрес в состоянии: со второго деплоя ветка не
+# срабатывает. Список — в переменную, а не трубой в `grep -q`: ранний выход
+# grep дал бы tofu SIGPIPE, и pipefail пропустил бы перенос.
+state="$(tofu -chdir=infra state list)"
+if grep -qx 'docker_container.worker' <<< "$state"; then
+  tofu -chdir=infra state mv -lock-timeout=2m 'docker_container.worker' 'docker_container.worker["dmc268-worker"]'
+fi
+
 tofu -chdir=infra plan -input=false -no-color -lock-timeout=2m -out=infra.tfplan \
   -target=docker_network.dmc268 \
   -target=docker_network.backend \

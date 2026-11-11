@@ -4,6 +4,7 @@
 переименованный алерт, метка или job иначе молча сделали бы компонент вечно `operational`.
 """
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ import yaml
 from app.domain.enums import ServiceComponent, ServiceStatus
 from app.domain.service_status import (
     ALERT_RULES,
+    WORKER_CONTAINER,
     ComponentStatus,
     FiringAlert,
     ServiceStatusReport,
@@ -42,7 +44,9 @@ SIGNALS = [
     ("ServiceProbeFailed", {"service": "api", "instance": "http://dmc268-api:8000/health"}, {API}, OUTAGE),
     ("Api5xxSpike", {"service": "api"}, {API}, DEGRADED),
     ("ContainerRestarting", {"container_name": "dmc268-api"}, {API}, DEGRADED),
-    ("ContainerDown", {"container_name": "dmc268-worker"}, {WORKER}, OUTAGE),
+    # Экземпляр воркера (#99) не запущен — degraded: задачи забирают остальные; outage — когда
+    # потребителей у очереди нет вовсе.
+    ("ContainerDown", {"container_name": "dmc268-worker"}, {WORKER}, DEGRADED),
     ("WorkerNotConsuming", {"service": "worker", "queue": "review_jobs.qq"}, {WORKER}, OUTAGE),
     ("ContainerRestarting", {"container_name": "dmc268-worker"}, {WORKER}, DEGRADED),
     ("ReviewRunsFailing", {"service": "worker"}, {WORKER}, DEGRADED),
@@ -76,8 +80,29 @@ def test_the_signal_list_covers_the_whole_table_except_blindness() -> None:
             and status is rule.status
             and components == set(rule.components)
             and rule.labels.items() <= labels.items()
+            and all(p.fullmatch(labels.get(k, "")) for k, p in rule.patterns.items())
             for name, labels, components, status in SIGNALS
         ), rule
+
+
+@pytest.mark.parametrize("container", ["dmc268-worker", "dmc268-worker-2", "dmc268-worker-4"])
+@pytest.mark.parametrize("alert", ["ContainerDown", "ContainerRestarting"])
+def test_any_worker_replica_degrades_the_worker(alert: str, container: str) -> None:
+    assert _statuses(FiringAlert(alert, {"container_name": container})) == {
+        API: OPERATIONAL,
+        WORKER: DEGRADED,
+        QUEUE: OPERATIONAL,
+    }
+
+
+def test_all_workers_down_is_an_outage() -> None:
+    """Остановлены все экземпляры: у очереди нет потребителей — WorkerNotConsuming, outage."""
+    statuses = _statuses(
+        FiringAlert("ContainerDown", {"container_name": "dmc268-worker"}),
+        FiringAlert("ContainerDown", {"container_name": "dmc268-worker-2"}),
+        FiringAlert("WorkerNotConsuming", {"service": "worker", "queue": "review_jobs.qq"}),
+    )
+    assert statuses == {API: OPERATIONAL, WORKER: OUTAGE, QUEUE: OPERATIONAL}
 
 
 BLIND = [
@@ -108,6 +133,9 @@ def test_the_blind_list_covers_the_table() -> None:
         FiringAlert("ContainerDown", {"container_name": "dmc268-postgres-replica"}),
         FiringAlert("ContainerDown", {"container_name": "dmc268-ui"}),
         FiringAlert("ContainerRestarting", {"container_name": "dmc268-grafana"}),
+        # Имя с тем же началом — не экземпляр воркера.
+        FiringAlert("ContainerDown", {"container_name": "dmc268-worker-old"}),
+        FiringAlert("ContainerRestarting", {"container_name": "dmc268-workers"}),
         FiringAlert("ContainerMemoryNearLimit", {"container_name": "dmc268-blackbox", "service": "blackbox"}),
         FiringAlert("ServiceProbeFailed", {"service": "postgres-replica"}),
         FiringAlert("DiskSpaceCritical", {"mountpoint": "/"}),
@@ -230,7 +258,7 @@ def test_matched_labels_come_from_the_series_not_from_the_rule() -> None:
     затирает `service` цели, поэтому таблица сопоставляет его по `job`, а не по `service`."""
     rules = _alert_rules()
     for rule in ALERT_RULES:
-        overridden = set(rule.labels) & set(rules[rule.alert].get("labels", {}))
+        overridden = (set(rule.labels) | set(rule.patterns)) & set(rules[rule.alert].get("labels", {}))
         assert not overridden, f"{rule.alert}: метки {overridden} задаёт само правило"
 
 
@@ -240,6 +268,26 @@ def test_container_names_are_watched_by_container_down() -> None:
         name = rule.labels.get("container_name")
         if name is not None:
             assert f'container_name="{name}"' in expr, name
+    # Экземпляры воркера — первый по имени и все по списку ожидаемых (workers.yml).
+    assert 'container_name="dmc268-worker"' in expr
+    assert "dmc268:worker_expected" in expr
+
+
+def test_worker_replica_names_match_the_infra_rule() -> None:
+    """Шаблон экземпляров — то же правило, по которому их называют infra и проверка деплоя:
+    первый — dmc268-worker, следующие — dmc268-worker-<N>."""
+    root = OBSERVABILITY.parents[1]
+    app_tf = (root / "infra" / "app.tf").read_text(encoding="utf-8")
+    assert re.search(r'worker_names = \[for i in range\(var\.worker_replicas\) : i == 0 \? "dmc268-worker" : "dmc268-worker-\$\{i \+ 1\}"\]', app_tf)
+    check = (root / ".github" / "scripts" / "deploy" / "check-worker.sh").read_text(encoding="utf-8")
+    shell = re.search(r"^pattern='(?P<p>[^']+)'$", check, re.MULTILINE)
+    assert shell is not None
+    for name in ("dmc268-worker", "dmc268-worker-2", "dmc268-worker-4"):
+        assert WORKER_CONTAINER.fullmatch(name), name
+        assert re.fullmatch(shell.group("p").strip("^$"), name), name
+    for name in ("dmc268-worker-old", "dmc268-workers", "dmc268-api"):
+        assert not WORKER_CONTAINER.fullmatch(name), name
+        assert not re.fullmatch(shell.group("p").strip("^$"), name), name
 
 
 def test_probe_services_and_scrape_jobs_exist() -> None:

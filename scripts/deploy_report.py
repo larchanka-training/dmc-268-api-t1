@@ -125,7 +125,7 @@ STEPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("apply", "Применить конфигурацию", ("apply",)),
     ("recover", "Восстановить состояние OpenTofu", ("recover", "state_artifact")),
     ("api_logs", "Логи API после упавшего apply", ("api_logs",)),
-    ("check_worker", "Проверить, что воркер работает", ("check_worker",)),
+    ("check_worker", "Проверить, что воркеры работают", ("check_worker",)),
     ("check_replica", "Проверить, что реплика получает поток", ("check_replica",)),
     ("prune", "Убрать устаревшие образы", ("prune",)),
 )

@@ -434,7 +434,8 @@ def upgrade() -> None:
   печатает их в stdout для отладки, `otlp` шлёт OTLP/HTTP в коллектор
   (`OTEL_EXPORTER_OTLP_ENDPOINT`). Ресурс дополняют `OTEL_RESOURCE_ATTRIBUTES` —
   `service.version` (в инфре — sha образа), `deployment.environment.name` и стабильный
-  `service.instance.id` по сервису (`dmc268-api`, `dmc268-worker`, `dmc268-migrate`): случайный
+  `service.instance.id` по сервису (`dmc268-api`, `dmc268-worker` и `dmc268-worker-<N>` у следующих
+  экземпляров воркера, `dmc268-migrate`): случайный
   UUID на процесс растил бы в Prometheus серии `exported_instance`. Таймаут OTLP —
   `OTEL_EXPORTER_OTLP_TIMEOUT=4`, в секундах: Python SDK читает переменную в секундах, вопреки
   спецификации OTel с её миллисекундами (4000 означало бы 66 минут), значение меньше окна
