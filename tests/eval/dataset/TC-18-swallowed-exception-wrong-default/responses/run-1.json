@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "1",
+  "findings": [
+    {
+      "filePath": "app/application/limits.py",
+      "side": "new",
+      "line": 25,
+      "category": "correctness",
+      "severity": "high",
+      "message": "`except Exception` глотает любую ошибку, включая баги в коде (`AttributeError`, опечатка в поле), без записи в лог, и возвращает `UNLIMITED`: при сбое биллинга любая организация получает безлимит. Ловите только ошибку доступности клиента, пишите её в лог с `exc_info` и откатывайтесь к `FREE_LIMITS` — консервативному значению.",
+      "confidence": 0.85,
+      "suggestion": null,
+      "rule": null
+    },
+    {
+      "filePath": "app/application/limits.py",
+      "side": "new",
+      "line": 8,
+      "category": "readability",
+      "severity": "low",
+      "message": "`logger` объявлен, но не используется — либо логируйте сбой биллинга, либо уберите импорт и объявление.",
+      "confidence": 0.5,
+      "suggestion": null,
+      "rule": null
+    }
+  ],
+  "summary": {
+    "problem": "Сбой биллинга молча превращается в безлимитный тариф.",
+    "positives": [
+      "Прогон больше не падает целиком из-за недоступного биллинга"
+    ],
+    "effort": "низкие"
+  }
+}

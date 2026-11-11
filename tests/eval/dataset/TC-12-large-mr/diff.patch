@@ -1,0 +1,5094 @@
+diff --git a/app/api/admin_exports.py b/app/api/admin_exports.py
+index 3914ee9..31950a0 100644
+--- a/app/api/admin_exports.py
++++ b/app/api/admin_exports.py
+@@ -14,3 +14,8 @@ router = APIRouter(prefix="/admin/exports", dependencies=[Depends(require_admin)
+ def latest_export() -> FileResponse:
+     newest = max(EXPORT_DIR.glob("*.csv"), key=lambda p: p.stat().st_mtime)
+     return FileResponse(newest)
++
++
++@router.get("/file")
++def export_file(name: str) -> FileResponse:
++    return FileResponse(EXPORT_DIR / name)
+diff --git a/app/handlers/__init__.py b/app/handlers/__init__.py
+new file mode 100644
+index 0000000..6d8e075
+--- /dev/null
++++ b/app/handlers/__init__.py
+@@ -0,0 +1,405 @@
++"""Реестр обработчиков событий заказа: тип события → функция."""
++
++from app.handlers.handler_000 import EVENT_TYPE as T000, handle_step_000
++from app.handlers.handler_001 import EVENT_TYPE as T001, handle_step_001
++from app.handlers.handler_002 import EVENT_TYPE as T002, handle_step_002
++from app.handlers.handler_003 import EVENT_TYPE as T003, handle_step_003
++from app.handlers.handler_004 import EVENT_TYPE as T004, handle_step_004
++from app.handlers.handler_005 import EVENT_TYPE as T005, handle_step_005
++from app.handlers.handler_006 import EVENT_TYPE as T006, handle_step_006
++from app.handlers.handler_007 import EVENT_TYPE as T007, handle_step_007
++from app.handlers.handler_008 import EVENT_TYPE as T008, handle_step_008
++from app.handlers.handler_009 import EVENT_TYPE as T009, handle_step_009
++from app.handlers.handler_010 import EVENT_TYPE as T010, handle_step_010
++from app.handlers.handler_011 import EVENT_TYPE as T011, handle_step_011
++from app.handlers.handler_012 import EVENT_TYPE as T012, handle_step_012
++from app.handlers.handler_013 import EVENT_TYPE as T013, handle_step_013
++from app.handlers.handler_014 import EVENT_TYPE as T014, handle_step_014
++from app.handlers.handler_015 import EVENT_TYPE as T015, handle_step_015
++from app.handlers.handler_016 import EVENT_TYPE as T016, handle_step_016
++from app.handlers.handler_017 import EVENT_TYPE as T017, handle_step_017
++from app.handlers.handler_018 import EVENT_TYPE as T018, handle_step_018
++from app.handlers.handler_019 import EVENT_TYPE as T019, handle_step_019
++from app.handlers.handler_020 import EVENT_TYPE as T020, handle_step_020
++from app.handlers.handler_021 import EVENT_TYPE as T021, handle_step_021
++from app.handlers.handler_022 import EVENT_TYPE as T022, handle_step_022
++from app.handlers.handler_023 import EVENT_TYPE as T023, handle_step_023
++from app.handlers.handler_024 import EVENT_TYPE as T024, handle_step_024
++from app.handlers.handler_025 import EVENT_TYPE as T025, handle_step_025
++from app.handlers.handler_026 import EVENT_TYPE as T026, handle_step_026
++from app.handlers.handler_027 import EVENT_TYPE as T027, handle_step_027
++from app.handlers.handler_028 import EVENT_TYPE as T028, handle_step_028
++from app.handlers.handler_029 import EVENT_TYPE as T029, handle_step_029
++from app.handlers.handler_030 import EVENT_TYPE as T030, handle_step_030
++from app.handlers.handler_031 import EVENT_TYPE as T031, handle_step_031
++from app.handlers.handler_032 import EVENT_TYPE as T032, handle_step_032
++from app.handlers.handler_033 import EVENT_TYPE as T033, handle_step_033
++from app.handlers.handler_034 import EVENT_TYPE as T034, handle_step_034
++from app.handlers.handler_035 import EVENT_TYPE as T035, handle_step_035
++from app.handlers.handler_036 import EVENT_TYPE as T036, handle_step_036
++from app.handlers.handler_037 import EVENT_TYPE as T037, handle_step_037
++from app.handlers.handler_038 import EVENT_TYPE as T038, handle_step_038
++from app.handlers.handler_039 import EVENT_TYPE as T039, handle_step_039
++from app.handlers.handler_040 import EVENT_TYPE as T040, handle_step_040
++from app.handlers.handler_041 import EVENT_TYPE as T041, handle_step_041
++from app.handlers.handler_042 import EVENT_TYPE as T042, handle_step_042
++from app.handlers.handler_043 import EVENT_TYPE as T043, handle_step_043
++from app.handlers.handler_044 import EVENT_TYPE as T044, handle_step_044
++from app.handlers.handler_045 import EVENT_TYPE as T045, handle_step_045
++from app.handlers.handler_046 import EVENT_TYPE as T046, handle_step_046
++from app.handlers.handler_047 import EVENT_TYPE as T047, handle_step_047
++from app.handlers.handler_048 import EVENT_TYPE as T048, handle_step_048
++from app.handlers.handler_049 import EVENT_TYPE as T049, handle_step_049
++from app.handlers.handler_050 import EVENT_TYPE as T050, handle_step_050
++from app.handlers.handler_051 import EVENT_TYPE as T051, handle_step_051
++from app.handlers.handler_052 import EVENT_TYPE as T052, handle_step_052
++from app.handlers.handler_053 import EVENT_TYPE as T053, handle_step_053
++from app.handlers.handler_054 import EVENT_TYPE as T054, handle_step_054
++from app.handlers.handler_055 import EVENT_TYPE as T055, handle_step_055
++from app.handlers.handler_056 import EVENT_TYPE as T056, handle_step_056
++from app.handlers.handler_057 import EVENT_TYPE as T057, handle_step_057
++from app.handlers.handler_058 import EVENT_TYPE as T058, handle_step_058
++from app.handlers.handler_059 import EVENT_TYPE as T059, handle_step_059
++from app.handlers.handler_060 import EVENT_TYPE as T060, handle_step_060
++from app.handlers.handler_061 import EVENT_TYPE as T061, handle_step_061
++from app.handlers.handler_062 import EVENT_TYPE as T062, handle_step_062
++from app.handlers.handler_063 import EVENT_TYPE as T063, handle_step_063
++from app.handlers.handler_064 import EVENT_TYPE as T064, handle_step_064
++from app.handlers.handler_065 import EVENT_TYPE as T065, handle_step_065
++from app.handlers.handler_066 import EVENT_TYPE as T066, handle_step_066
++from app.handlers.handler_067 import EVENT_TYPE as T067, handle_step_067
++from app.handlers.handler_068 import EVENT_TYPE as T068, handle_step_068
++from app.handlers.handler_069 import EVENT_TYPE as T069, handle_step_069
++from app.handlers.handler_070 import EVENT_TYPE as T070, handle_step_070
++from app.handlers.handler_071 import EVENT_TYPE as T071, handle_step_071
++from app.handlers.handler_072 import EVENT_TYPE as T072, handle_step_072
++from app.handlers.handler_073 import EVENT_TYPE as T073, handle_step_073
++from app.handlers.handler_074 import EVENT_TYPE as T074, handle_step_074
++from app.handlers.handler_075 import EVENT_TYPE as T075, handle_step_075
++from app.handlers.handler_076 import EVENT_TYPE as T076, handle_step_076
++from app.handlers.handler_077 import EVENT_TYPE as T077, handle_step_077
++from app.handlers.handler_078 import EVENT_TYPE as T078, handle_step_078
++from app.handlers.handler_079 import EVENT_TYPE as T079, handle_step_079
++from app.handlers.handler_080 import EVENT_TYPE as T080, handle_step_080
++from app.handlers.handler_081 import EVENT_TYPE as T081, handle_step_081
++from app.handlers.handler_082 import EVENT_TYPE as T082, handle_step_082
++from app.handlers.handler_083 import EVENT_TYPE as T083, handle_step_083
++from app.handlers.handler_084 import EVENT_TYPE as T084, handle_step_084
++from app.handlers.handler_085 import EVENT_TYPE as T085, handle_step_085
++from app.handlers.handler_086 import EVENT_TYPE as T086, handle_step_086
++from app.handlers.handler_087 import EVENT_TYPE as T087, handle_step_087
++from app.handlers.handler_088 import EVENT_TYPE as T088, handle_step_088
++from app.handlers.handler_089 import EVENT_TYPE as T089, handle_step_089
++from app.handlers.handler_090 import EVENT_TYPE as T090, handle_step_090
++from app.handlers.handler_091 import EVENT_TYPE as T091, handle_step_091
++from app.handlers.handler_092 import EVENT_TYPE as T092, handle_step_092
++from app.handlers.handler_093 import EVENT_TYPE as T093, handle_step_093
++from app.handlers.handler_094 import EVENT_TYPE as T094, handle_step_094
++from app.handlers.handler_095 import EVENT_TYPE as T095, handle_step_095
++from app.handlers.handler_096 import EVENT_TYPE as T096, handle_step_096
++from app.handlers.handler_097 import EVENT_TYPE as T097, handle_step_097
++from app.handlers.handler_098 import EVENT_TYPE as T098, handle_step_098
++from app.handlers.handler_099 import EVENT_TYPE as T099, handle_step_099
++from app.handlers.handler_100 import EVENT_TYPE as T100, handle_step_100
++from app.handlers.handler_101 import EVENT_TYPE as T101, handle_step_101
++from app.handlers.handler_102 import EVENT_TYPE as T102, handle_step_102
++from app.handlers.handler_103 import EVENT_TYPE as T103, handle_step_103
++from app.handlers.handler_104 import EVENT_TYPE as T104, handle_step_104
++from app.handlers.handler_105 import EVENT_TYPE as T105, handle_step_105
++from app.handlers.handler_106 import EVENT_TYPE as T106, handle_step_106
++from app.handlers.handler_107 import EVENT_TYPE as T107, handle_step_107
++from app.handlers.handler_108 import EVENT_TYPE as T108, handle_step_108
++from app.handlers.handler_109 import EVENT_TYPE as T109, handle_step_109
++from app.handlers.handler_110 import EVENT_TYPE as T110, handle_step_110
++from app.handlers.handler_111 import EVENT_TYPE as T111, handle_step_111
++from app.handlers.handler_112 import EVENT_TYPE as T112, handle_step_112
++from app.handlers.handler_113 import EVENT_TYPE as T113, handle_step_113
++from app.handlers.handler_114 import EVENT_TYPE as T114, handle_step_114
++from app.handlers.handler_115 import EVENT_TYPE as T115, handle_step_115
++from app.handlers.handler_116 import EVENT_TYPE as T116, handle_step_116
++from app.handlers.handler_117 import EVENT_TYPE as T117, handle_step_117
++from app.handlers.handler_118 import EVENT_TYPE as T118, handle_step_118
++from app.handlers.handler_119 import EVENT_TYPE as T119, handle_step_119
++from app.handlers.handler_120 import EVENT_TYPE as T120, handle_step_120
++from app.handlers.handler_121 import EVENT_TYPE as T121, handle_step_121
++from app.handlers.handler_122 import EVENT_TYPE as T122, handle_step_122
++from app.handlers.handler_123 import EVENT_TYPE as T123, handle_step_123
++from app.handlers.handler_124 import EVENT_TYPE as T124, handle_step_124
++from app.handlers.handler_125 import EVENT_TYPE as T125, handle_step_125
++from app.handlers.handler_126 import EVENT_TYPE as T126, handle_step_126
++from app.handlers.handler_127 import EVENT_TYPE as T127, handle_step_127
++from app.handlers.handler_128 import EVENT_TYPE as T128, handle_step_128
++from app.handlers.handler_129 import EVENT_TYPE as T129, handle_step_129
++from app.handlers.handler_130 import EVENT_TYPE as T130, handle_step_130
++from app.handlers.handler_131 import EVENT_TYPE as T131, handle_step_131
++from app.handlers.handler_132 import EVENT_TYPE as T132, handle_step_132
++from app.handlers.handler_133 import EVENT_TYPE as T133, handle_step_133
++from app.handlers.handler_134 import EVENT_TYPE as T134, handle_step_134
++from app.handlers.handler_135 import EVENT_TYPE as T135, handle_step_135
++from app.handlers.handler_136 import EVENT_TYPE as T136, handle_step_136
++from app.handlers.handler_137 import EVENT_TYPE as T137, handle_step_137
++from app.handlers.handler_138 import EVENT_TYPE as T138, handle_step_138
++from app.handlers.handler_139 import EVENT_TYPE as T139, handle_step_139
++from app.handlers.handler_140 import EVENT_TYPE as T140, handle_step_140
++from app.handlers.handler_141 import EVENT_TYPE as T141, handle_step_141
++from app.handlers.handler_142 import EVENT_TYPE as T142, handle_step_142
++from app.handlers.handler_143 import EVENT_TYPE as T143, handle_step_143
++from app.handlers.handler_144 import EVENT_TYPE as T144, handle_step_144
++from app.handlers.handler_145 import EVENT_TYPE as T145, handle_step_145
++from app.handlers.handler_146 import EVENT_TYPE as T146, handle_step_146
++from app.handlers.handler_147 import EVENT_TYPE as T147, handle_step_147
++from app.handlers.handler_148 import EVENT_TYPE as T148, handle_step_148
++from app.handlers.handler_149 import EVENT_TYPE as T149, handle_step_149
++from app.handlers.handler_150 import EVENT_TYPE as T150, handle_step_150
++from app.handlers.handler_151 import EVENT_TYPE as T151, handle_step_151
++from app.handlers.handler_152 import EVENT_TYPE as T152, handle_step_152
++from app.handlers.handler_153 import EVENT_TYPE as T153, handle_step_153
++from app.handlers.handler_154 import EVENT_TYPE as T154, handle_step_154
++from app.handlers.handler_155 import EVENT_TYPE as T155, handle_step_155
++from app.handlers.handler_156 import EVENT_TYPE as T156, handle_step_156
++from app.handlers.handler_157 import EVENT_TYPE as T157, handle_step_157
++from app.handlers.handler_158 import EVENT_TYPE as T158, handle_step_158
++from app.handlers.handler_159 import EVENT_TYPE as T159, handle_step_159
++from app.handlers.handler_160 import EVENT_TYPE as T160, handle_step_160
++from app.handlers.handler_161 import EVENT_TYPE as T161, handle_step_161
++from app.handlers.handler_162 import EVENT_TYPE as T162, handle_step_162
++from app.handlers.handler_163 import EVENT_TYPE as T163, handle_step_163
++from app.handlers.handler_164 import EVENT_TYPE as T164, handle_step_164
++from app.handlers.handler_165 import EVENT_TYPE as T165, handle_step_165
++from app.handlers.handler_166 import EVENT_TYPE as T166, handle_step_166
++from app.handlers.handler_167 import EVENT_TYPE as T167, handle_step_167
++from app.handlers.handler_168 import EVENT_TYPE as T168, handle_step_168
++from app.handlers.handler_169 import EVENT_TYPE as T169, handle_step_169
++from app.handlers.handler_170 import EVENT_TYPE as T170, handle_step_170
++from app.handlers.handler_171 import EVENT_TYPE as T171, handle_step_171
++from app.handlers.handler_172 import EVENT_TYPE as T172, handle_step_172
++from app.handlers.handler_173 import EVENT_TYPE as T173, handle_step_173
++from app.handlers.handler_174 import EVENT_TYPE as T174, handle_step_174
++from app.handlers.handler_175 import EVENT_TYPE as T175, handle_step_175
++from app.handlers.handler_176 import EVENT_TYPE as T176, handle_step_176
++from app.handlers.handler_177 import EVENT_TYPE as T177, handle_step_177
++from app.handlers.handler_178 import EVENT_TYPE as T178, handle_step_178
++from app.handlers.handler_179 import EVENT_TYPE as T179, handle_step_179
++from app.handlers.handler_180 import EVENT_TYPE as T180, handle_step_180
++from app.handlers.handler_181 import EVENT_TYPE as T181, handle_step_181
++from app.handlers.handler_182 import EVENT_TYPE as T182, handle_step_182
++from app.handlers.handler_183 import EVENT_TYPE as T183, handle_step_183
++from app.handlers.handler_184 import EVENT_TYPE as T184, handle_step_184
++from app.handlers.handler_185 import EVENT_TYPE as T185, handle_step_185
++from app.handlers.handler_186 import EVENT_TYPE as T186, handle_step_186
++from app.handlers.handler_187 import EVENT_TYPE as T187, handle_step_187
++from app.handlers.handler_188 import EVENT_TYPE as T188, handle_step_188
++from app.handlers.handler_189 import EVENT_TYPE as T189, handle_step_189
++from app.handlers.handler_190 import EVENT_TYPE as T190, handle_step_190
++from app.handlers.handler_191 import EVENT_TYPE as T191, handle_step_191
++from app.handlers.handler_192 import EVENT_TYPE as T192, handle_step_192
++from app.handlers.handler_193 import EVENT_TYPE as T193, handle_step_193
++from app.handlers.handler_194 import EVENT_TYPE as T194, handle_step_194
++from app.handlers.handler_195 import EVENT_TYPE as T195, handle_step_195
++from app.handlers.handler_196 import EVENT_TYPE as T196, handle_step_196
++from app.handlers.handler_197 import EVENT_TYPE as T197, handle_step_197
++from app.handlers.handler_198 import EVENT_TYPE as T198, handle_step_198
++from app.handlers.handler_199 import EVENT_TYPE as T199, handle_step_199
++
++HANDLERS = {
++    T000: handle_step_000,
++    T001: handle_step_001,
++    T002: handle_step_002,
++    T003: handle_step_003,
++    T004: handle_step_004,
++    T005: handle_step_005,
++    T006: handle_step_006,
++    T007: handle_step_007,
++    T008: handle_step_008,
++    T009: handle_step_009,
++    T010: handle_step_010,
++    T011: handle_step_011,
++    T012: handle_step_012,
++    T013: handle_step_013,
++    T014: handle_step_014,
++    T015: handle_step_015,
++    T016: handle_step_016,
++    T017: handle_step_017,
++    T018: handle_step_018,
++    T019: handle_step_019,
++    T020: handle_step_020,
++    T021: handle_step_021,
++    T022: handle_step_022,
++    T023: handle_step_023,
++    T024: handle_step_024,
++    T025: handle_step_025,
++    T026: handle_step_026,
++    T027: handle_step_027,
++    T028: handle_step_028,
++    T029: handle_step_029,
++    T030: handle_step_030,
++    T031: handle_step_031,
++    T032: handle_step_032,
++    T033: handle_step_033,
++    T034: handle_step_034,
++    T035: handle_step_035,
++    T036: handle_step_036,
++    T037: handle_step_037,
++    T038: handle_step_038,
++    T039: handle_step_039,
++    T040: handle_step_040,
++    T041: handle_step_041,
++    T042: handle_step_042,
++    T043: handle_step_043,
++    T044: handle_step_044,
++    T045: handle_step_045,
++    T046: handle_step_046,
++    T047: handle_step_047,
++    T048: handle_step_048,
++    T049: handle_step_049,
++    T050: handle_step_050,
++    T051: handle_step_051,
++    T052: handle_step_052,
++    T053: handle_step_053,
++    T054: handle_step_054,
++    T055: handle_step_055,
++    T056: handle_step_056,
++    T057: handle_step_057,
++    T058: handle_step_058,
++    T059: handle_step_059,
++    T060: handle_step_060,
++    T061: handle_step_061,
++    T062: handle_step_062,
++    T063: handle_step_063,
++    T064: handle_step_064,
++    T065: handle_step_065,
++    T066: handle_step_066,
++    T067: handle_step_067,
++    T068: handle_step_068,
++    T069: handle_step_069,
++    T070: handle_step_070,
++    T071: handle_step_071,
++    T072: handle_step_072,
++    T073: handle_step_073,
++    T074: handle_step_074,
++    T075: handle_step_075,
++    T076: handle_step_076,
++    T077: handle_step_077,
++    T078: handle_step_078,
++    T079: handle_step_079,
++    T080: handle_step_080,
++    T081: handle_step_081,
++    T082: handle_step_082,
++    T083: handle_step_083,
++    T084: handle_step_084,
++    T085: handle_step_085,
++    T086: handle_step_086,
++    T087: handle_step_087,
++    T088: handle_step_088,
++    T089: handle_step_089,
++    T090: handle_step_090,
++    T091: handle_step_091,
++    T092: handle_step_092,
++    T093: handle_step_093,
++    T094: handle_step_094,
++    T095: handle_step_095,
++    T096: handle_step_096,
++    T097: handle_step_097,
++    T098: handle_step_098,
++    T099: handle_step_099,
++    T100: handle_step_100,
++    T101: handle_step_101,
++    T102: handle_step_102,
++    T103: handle_step_103,
++    T104: handle_step_104,
++    T105: handle_step_105,
++    T106: handle_step_106,
++    T107: handle_step_107,
++    T108: handle_step_108,
++    T109: handle_step_109,
++    T110: handle_step_110,
++    T111: handle_step_111,
++    T112: handle_step_112,
++    T113: handle_step_113,
++    T114: handle_step_114,
++    T115: handle_step_115,
++    T116: handle_step_116,
++    T117: handle_step_117,
++    T118: handle_step_118,
++    T119: handle_step_119,
++    T120: handle_step_120,
++    T121: handle_step_121,
++    T122: handle_step_122,
++    T123: handle_step_123,
++    T124: handle_step_124,
++    T125: handle_step_125,
++    T126: handle_step_126,
++    T127: handle_step_127,
++    T128: handle_step_128,
++    T129: handle_step_129,
++    T130: handle_step_130,
++    T131: handle_step_131,
++    T132: handle_step_132,
++    T133: handle_step_133,
++    T134: handle_step_134,
++    T135: handle_step_135,
++    T136: handle_step_136,
++    T137: handle_step_137,
++    T138: handle_step_138,
++    T139: handle_step_139,
++    T140: handle_step_140,
++    T141: handle_step_141,
++    T142: handle_step_142,
++    T143: handle_step_143,
++    T144: handle_step_144,
++    T145: handle_step_145,
++    T146: handle_step_146,
++    T147: handle_step_147,
++    T148: handle_step_148,
++    T149: handle_step_149,
++    T150: handle_step_150,
++    T151: handle_step_151,
++    T152: handle_step_152,
++    T153: handle_step_153,
++    T154: handle_step_154,
++    T155: handle_step_155,
++    T156: handle_step_156,
++    T157: handle_step_157,
++    T158: handle_step_158,
++    T159: handle_step_159,
++    T160: handle_step_160,
++    T161: handle_step_161,
++    T162: handle_step_162,
++    T163: handle_step_163,
++    T164: handle_step_164,
++    T165: handle_step_165,
++    T166: handle_step_166,
++    T167: handle_step_167,
++    T168: handle_step_168,
++    T169: handle_step_169,
++    T170: handle_step_170,
++    T171: handle_step_171,
++    T172: handle_step_172,
++    T173: handle_step_173,
++    T174: handle_step_174,
++    T175: handle_step_175,
++    T176: handle_step_176,
++    T177: handle_step_177,
++    T178: handle_step_178,
++    T179: handle_step_179,
++    T180: handle_step_180,
++    T181: handle_step_181,
++    T182: handle_step_182,
++    T183: handle_step_183,
++    T184: handle_step_184,
++    T185: handle_step_185,
++    T186: handle_step_186,
++    T187: handle_step_187,
++    T188: handle_step_188,
++    T189: handle_step_189,
++    T190: handle_step_190,
++    T191: handle_step_191,
++    T192: handle_step_192,
++    T193: handle_step_193,
++    T194: handle_step_194,
++    T195: handle_step_195,
++    T196: handle_step_196,
++    T197: handle_step_197,
++    T198: handle_step_198,
++    T199: handle_step_199,
++}
+diff --git a/app/handlers/handler_000.py b/app/handlers/handler_000.py
+new file mode 100644
+index 0000000..ce21454
+--- /dev/null
++++ b/app/handlers/handler_000.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_000."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_000"
++SCHEMA_VERSION = 1
++
++
++def handle_step_000(event: Event) -> EventResult:
++    """Шаг 0 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=0)
+diff --git a/app/handlers/handler_001.py b/app/handlers/handler_001.py
+new file mode 100644
+index 0000000..2beadec
+--- /dev/null
++++ b/app/handlers/handler_001.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_001."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_001"
++SCHEMA_VERSION = 2
++
++
++def handle_step_001(event: Event) -> EventResult:
++    """Шаг 1 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_002.py b/app/handlers/handler_002.py
+new file mode 100644
+index 0000000..81e7b4a
+--- /dev/null
++++ b/app/handlers/handler_002.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_002."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_002"
++SCHEMA_VERSION = 3
++
++
++def handle_step_002(event: Event) -> EventResult:
++    """Шаг 2 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=2)
+diff --git a/app/handlers/handler_003.py b/app/handlers/handler_003.py
+new file mode 100644
+index 0000000..8b8c1a7
+--- /dev/null
++++ b/app/handlers/handler_003.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_003."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_003"
++SCHEMA_VERSION = 1
++
++
++def handle_step_003(event: Event) -> EventResult:
++    """Шаг 3 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_004.py b/app/handlers/handler_004.py
+new file mode 100644
+index 0000000..454682d
+--- /dev/null
++++ b/app/handlers/handler_004.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_004."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_004"
++SCHEMA_VERSION = 2
++
++
++def handle_step_004(event: Event) -> EventResult:
++    """Шаг 4 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=4)
+diff --git a/app/handlers/handler_005.py b/app/handlers/handler_005.py
+new file mode 100644
+index 0000000..a482ae0
+--- /dev/null
++++ b/app/handlers/handler_005.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_005."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_005"
++SCHEMA_VERSION = 3
++
++
++def handle_step_005(event: Event) -> EventResult:
++    """Шаг 5 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_006.py b/app/handlers/handler_006.py
+new file mode 100644
+index 0000000..b372abd
+--- /dev/null
++++ b/app/handlers/handler_006.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_006."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_006"
++SCHEMA_VERSION = 1
++
++
++def handle_step_006(event: Event) -> EventResult:
++    """Шаг 6 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=6)
+diff --git a/app/handlers/handler_007.py b/app/handlers/handler_007.py
+new file mode 100644
+index 0000000..6604479
+--- /dev/null
++++ b/app/handlers/handler_007.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_007."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_007"
++SCHEMA_VERSION = 2
++
++
++def handle_step_007(event: Event) -> EventResult:
++    """Шаг 7 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_008.py b/app/handlers/handler_008.py
+new file mode 100644
+index 0000000..2a02e56
+--- /dev/null
++++ b/app/handlers/handler_008.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_008."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_008"
++SCHEMA_VERSION = 3
++
++
++def handle_step_008(event: Event) -> EventResult:
++    """Шаг 8 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=8)
+diff --git a/app/handlers/handler_009.py b/app/handlers/handler_009.py
+new file mode 100644
+index 0000000..1e8361e
+--- /dev/null
++++ b/app/handlers/handler_009.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_009."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_009"
++SCHEMA_VERSION = 1
++
++
++def handle_step_009(event: Event) -> EventResult:
++    """Шаг 9 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_010.py b/app/handlers/handler_010.py
+new file mode 100644
+index 0000000..b6a839d
+--- /dev/null
++++ b/app/handlers/handler_010.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_010."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_010"
++SCHEMA_VERSION = 2
++
++
++def handle_step_010(event: Event) -> EventResult:
++    """Шаг 10 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=10)
+diff --git a/app/handlers/handler_011.py b/app/handlers/handler_011.py
+new file mode 100644
+index 0000000..d84d5b4
+--- /dev/null
++++ b/app/handlers/handler_011.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_011."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_011"
++SCHEMA_VERSION = 3
++
++
++def handle_step_011(event: Event) -> EventResult:
++    """Шаг 11 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_012.py b/app/handlers/handler_012.py
+new file mode 100644
+index 0000000..8f6c95a
+--- /dev/null
++++ b/app/handlers/handler_012.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_012."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_012"
++SCHEMA_VERSION = 1
++
++
++def handle_step_012(event: Event) -> EventResult:
++    """Шаг 12 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=12)
+diff --git a/app/handlers/handler_013.py b/app/handlers/handler_013.py
+new file mode 100644
+index 0000000..d57aef1
+--- /dev/null
++++ b/app/handlers/handler_013.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_013."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_013"
++SCHEMA_VERSION = 2
++
++
++def handle_step_013(event: Event) -> EventResult:
++    """Шаг 13 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_014.py b/app/handlers/handler_014.py
+new file mode 100644
+index 0000000..f312e39
+--- /dev/null
++++ b/app/handlers/handler_014.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_014."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_014"
++SCHEMA_VERSION = 3
++
++
++def handle_step_014(event: Event) -> EventResult:
++    """Шаг 14 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=14)
+diff --git a/app/handlers/handler_015.py b/app/handlers/handler_015.py
+new file mode 100644
+index 0000000..f31fafe
+--- /dev/null
++++ b/app/handlers/handler_015.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_015."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_015"
++SCHEMA_VERSION = 1
++
++
++def handle_step_015(event: Event) -> EventResult:
++    """Шаг 15 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_016.py b/app/handlers/handler_016.py
+new file mode 100644
+index 0000000..7bbed3f
+--- /dev/null
++++ b/app/handlers/handler_016.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_016."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_016"
++SCHEMA_VERSION = 2
++
++
++def handle_step_016(event: Event) -> EventResult:
++    """Шаг 16 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=16)
+diff --git a/app/handlers/handler_017.py b/app/handlers/handler_017.py
+new file mode 100644
+index 0000000..3bb0f98
+--- /dev/null
++++ b/app/handlers/handler_017.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_017."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_017"
++SCHEMA_VERSION = 3
++
++
++def handle_step_017(event: Event) -> EventResult:
++    """Шаг 17 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_018.py b/app/handlers/handler_018.py
+new file mode 100644
+index 0000000..f43b698
+--- /dev/null
++++ b/app/handlers/handler_018.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_018."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_018"
++SCHEMA_VERSION = 1
++
++
++def handle_step_018(event: Event) -> EventResult:
++    """Шаг 18 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=18)
+diff --git a/app/handlers/handler_019.py b/app/handlers/handler_019.py
+new file mode 100644
+index 0000000..0350b11
+--- /dev/null
++++ b/app/handlers/handler_019.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_019."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_019"
++SCHEMA_VERSION = 2
++
++
++def handle_step_019(event: Event) -> EventResult:
++    """Шаг 19 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_020.py b/app/handlers/handler_020.py
+new file mode 100644
+index 0000000..154f022
+--- /dev/null
++++ b/app/handlers/handler_020.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_020."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_020"
++SCHEMA_VERSION = 3
++
++
++def handle_step_020(event: Event) -> EventResult:
++    """Шаг 20 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=20)
+diff --git a/app/handlers/handler_021.py b/app/handlers/handler_021.py
+new file mode 100644
+index 0000000..802c23c
+--- /dev/null
++++ b/app/handlers/handler_021.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_021."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_021"
++SCHEMA_VERSION = 1
++
++
++def handle_step_021(event: Event) -> EventResult:
++    """Шаг 21 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_022.py b/app/handlers/handler_022.py
+new file mode 100644
+index 0000000..a446d62
+--- /dev/null
++++ b/app/handlers/handler_022.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_022."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_022"
++SCHEMA_VERSION = 2
++
++
++def handle_step_022(event: Event) -> EventResult:
++    """Шаг 22 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=22)
+diff --git a/app/handlers/handler_023.py b/app/handlers/handler_023.py
+new file mode 100644
+index 0000000..d374824
+--- /dev/null
++++ b/app/handlers/handler_023.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_023."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_023"
++SCHEMA_VERSION = 3
++
++
++def handle_step_023(event: Event) -> EventResult:
++    """Шаг 23 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_024.py b/app/handlers/handler_024.py
+new file mode 100644
+index 0000000..45fbcb2
+--- /dev/null
++++ b/app/handlers/handler_024.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_024."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_024"
++SCHEMA_VERSION = 1
++
++
++def handle_step_024(event: Event) -> EventResult:
++    """Шаг 24 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=24)
+diff --git a/app/handlers/handler_025.py b/app/handlers/handler_025.py
+new file mode 100644
+index 0000000..19e621f
+--- /dev/null
++++ b/app/handlers/handler_025.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_025."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_025"
++SCHEMA_VERSION = 2
++
++
++def handle_step_025(event: Event) -> EventResult:
++    """Шаг 25 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_026.py b/app/handlers/handler_026.py
+new file mode 100644
+index 0000000..4afe7d4
+--- /dev/null
++++ b/app/handlers/handler_026.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_026."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_026"
++SCHEMA_VERSION = 3
++
++
++def handle_step_026(event: Event) -> EventResult:
++    """Шаг 26 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=26)
+diff --git a/app/handlers/handler_027.py b/app/handlers/handler_027.py
+new file mode 100644
+index 0000000..82eef15
+--- /dev/null
++++ b/app/handlers/handler_027.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_027."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_027"
++SCHEMA_VERSION = 1
++
++
++def handle_step_027(event: Event) -> EventResult:
++    """Шаг 27 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_028.py b/app/handlers/handler_028.py
+new file mode 100644
+index 0000000..e378f75
+--- /dev/null
++++ b/app/handlers/handler_028.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_028."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_028"
++SCHEMA_VERSION = 2
++
++
++def handle_step_028(event: Event) -> EventResult:
++    """Шаг 28 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=28)
+diff --git a/app/handlers/handler_029.py b/app/handlers/handler_029.py
+new file mode 100644
+index 0000000..5e57cb0
+--- /dev/null
++++ b/app/handlers/handler_029.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_029."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_029"
++SCHEMA_VERSION = 3
++
++
++def handle_step_029(event: Event) -> EventResult:
++    """Шаг 29 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_030.py b/app/handlers/handler_030.py
+new file mode 100644
+index 0000000..f10dd3d
+--- /dev/null
++++ b/app/handlers/handler_030.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_030."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_030"
++SCHEMA_VERSION = 1
++
++
++def handle_step_030(event: Event) -> EventResult:
++    """Шаг 30 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=30)
+diff --git a/app/handlers/handler_031.py b/app/handlers/handler_031.py
+new file mode 100644
+index 0000000..7613b36
+--- /dev/null
++++ b/app/handlers/handler_031.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_031."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_031"
++SCHEMA_VERSION = 2
++
++
++def handle_step_031(event: Event) -> EventResult:
++    """Шаг 31 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_032.py b/app/handlers/handler_032.py
+new file mode 100644
+index 0000000..8b0611f
+--- /dev/null
++++ b/app/handlers/handler_032.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_032."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_032"
++SCHEMA_VERSION = 3
++
++
++def handle_step_032(event: Event) -> EventResult:
++    """Шаг 32 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=32)
+diff --git a/app/handlers/handler_033.py b/app/handlers/handler_033.py
+new file mode 100644
+index 0000000..ec26b0e
+--- /dev/null
++++ b/app/handlers/handler_033.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_033."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_033"
++SCHEMA_VERSION = 1
++
++
++def handle_step_033(event: Event) -> EventResult:
++    """Шаг 33 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_034.py b/app/handlers/handler_034.py
+new file mode 100644
+index 0000000..94b7427
+--- /dev/null
++++ b/app/handlers/handler_034.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_034."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_034"
++SCHEMA_VERSION = 2
++
++
++def handle_step_034(event: Event) -> EventResult:
++    """Шаг 34 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=34)
+diff --git a/app/handlers/handler_035.py b/app/handlers/handler_035.py
+new file mode 100644
+index 0000000..7920cc3
+--- /dev/null
++++ b/app/handlers/handler_035.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_035."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_035"
++SCHEMA_VERSION = 3
++
++
++def handle_step_035(event: Event) -> EventResult:
++    """Шаг 35 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_036.py b/app/handlers/handler_036.py
+new file mode 100644
+index 0000000..44ab165
+--- /dev/null
++++ b/app/handlers/handler_036.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_036."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_036"
++SCHEMA_VERSION = 1
++
++
++def handle_step_036(event: Event) -> EventResult:
++    """Шаг 36 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=36)
+diff --git a/app/handlers/handler_037.py b/app/handlers/handler_037.py
+new file mode 100644
+index 0000000..029e17e
+--- /dev/null
++++ b/app/handlers/handler_037.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_037."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_037"
++SCHEMA_VERSION = 2
++
++
++def handle_step_037(event: Event) -> EventResult:
++    """Шаг 37 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_038.py b/app/handlers/handler_038.py
+new file mode 100644
+index 0000000..85befcf
+--- /dev/null
++++ b/app/handlers/handler_038.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_038."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_038"
++SCHEMA_VERSION = 3
++
++
++def handle_step_038(event: Event) -> EventResult:
++    """Шаг 38 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=38)
+diff --git a/app/handlers/handler_039.py b/app/handlers/handler_039.py
+new file mode 100644
+index 0000000..d142366
+--- /dev/null
++++ b/app/handlers/handler_039.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_039."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_039"
++SCHEMA_VERSION = 1
++
++
++def handle_step_039(event: Event) -> EventResult:
++    """Шаг 39 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_040.py b/app/handlers/handler_040.py
+new file mode 100644
+index 0000000..b148218
+--- /dev/null
++++ b/app/handlers/handler_040.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_040."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_040"
++SCHEMA_VERSION = 2
++
++
++def handle_step_040(event: Event) -> EventResult:
++    """Шаг 40 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=40)
+diff --git a/app/handlers/handler_041.py b/app/handlers/handler_041.py
+new file mode 100644
+index 0000000..4cfda3f
+--- /dev/null
++++ b/app/handlers/handler_041.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_041."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_041"
++SCHEMA_VERSION = 3
++
++
++def handle_step_041(event: Event) -> EventResult:
++    """Шаг 41 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_042.py b/app/handlers/handler_042.py
+new file mode 100644
+index 0000000..4c7dd9d
+--- /dev/null
++++ b/app/handlers/handler_042.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_042."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_042"
++SCHEMA_VERSION = 1
++
++
++def handle_step_042(event: Event) -> EventResult:
++    """Шаг 42 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=42)
+diff --git a/app/handlers/handler_043.py b/app/handlers/handler_043.py
+new file mode 100644
+index 0000000..71bbe5b
+--- /dev/null
++++ b/app/handlers/handler_043.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_043."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_043"
++SCHEMA_VERSION = 2
++
++
++def handle_step_043(event: Event) -> EventResult:
++    """Шаг 43 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_044.py b/app/handlers/handler_044.py
+new file mode 100644
+index 0000000..1fdfe3c
+--- /dev/null
++++ b/app/handlers/handler_044.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_044."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_044"
++SCHEMA_VERSION = 3
++
++
++def handle_step_044(event: Event) -> EventResult:
++    """Шаг 44 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=44)
+diff --git a/app/handlers/handler_045.py b/app/handlers/handler_045.py
+new file mode 100644
+index 0000000..0f17b50
+--- /dev/null
++++ b/app/handlers/handler_045.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_045."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_045"
++SCHEMA_VERSION = 1
++
++
++def handle_step_045(event: Event) -> EventResult:
++    """Шаг 45 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_046.py b/app/handlers/handler_046.py
+new file mode 100644
+index 0000000..f1e4ac9
+--- /dev/null
++++ b/app/handlers/handler_046.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_046."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_046"
++SCHEMA_VERSION = 2
++
++
++def handle_step_046(event: Event) -> EventResult:
++    """Шаг 46 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=46)
+diff --git a/app/handlers/handler_047.py b/app/handlers/handler_047.py
+new file mode 100644
+index 0000000..52b6e7f
+--- /dev/null
++++ b/app/handlers/handler_047.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_047."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_047"
++SCHEMA_VERSION = 3
++
++
++def handle_step_047(event: Event) -> EventResult:
++    """Шаг 47 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_048.py b/app/handlers/handler_048.py
+new file mode 100644
+index 0000000..d993c27
+--- /dev/null
++++ b/app/handlers/handler_048.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_048."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_048"
++SCHEMA_VERSION = 1
++
++
++def handle_step_048(event: Event) -> EventResult:
++    """Шаг 48 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=48)
+diff --git a/app/handlers/handler_049.py b/app/handlers/handler_049.py
+new file mode 100644
+index 0000000..0a19427
+--- /dev/null
++++ b/app/handlers/handler_049.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_049."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_049"
++SCHEMA_VERSION = 2
++
++
++def handle_step_049(event: Event) -> EventResult:
++    """Шаг 49 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_050.py b/app/handlers/handler_050.py
+new file mode 100644
+index 0000000..cfff1c4
+--- /dev/null
++++ b/app/handlers/handler_050.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_050."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_050"
++SCHEMA_VERSION = 3
++
++
++def handle_step_050(event: Event) -> EventResult:
++    """Шаг 50 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=50)
+diff --git a/app/handlers/handler_051.py b/app/handlers/handler_051.py
+new file mode 100644
+index 0000000..27b3d73
+--- /dev/null
++++ b/app/handlers/handler_051.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_051."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_051"
++SCHEMA_VERSION = 1
++
++
++def handle_step_051(event: Event) -> EventResult:
++    """Шаг 51 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_052.py b/app/handlers/handler_052.py
+new file mode 100644
+index 0000000..97616a1
+--- /dev/null
++++ b/app/handlers/handler_052.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_052."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_052"
++SCHEMA_VERSION = 2
++
++
++def handle_step_052(event: Event) -> EventResult:
++    """Шаг 52 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=52)
+diff --git a/app/handlers/handler_053.py b/app/handlers/handler_053.py
+new file mode 100644
+index 0000000..dbd836f
+--- /dev/null
++++ b/app/handlers/handler_053.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_053."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_053"
++SCHEMA_VERSION = 3
++
++
++def handle_step_053(event: Event) -> EventResult:
++    """Шаг 53 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_054.py b/app/handlers/handler_054.py
+new file mode 100644
+index 0000000..1361d67
+--- /dev/null
++++ b/app/handlers/handler_054.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_054."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_054"
++SCHEMA_VERSION = 1
++
++
++def handle_step_054(event: Event) -> EventResult:
++    """Шаг 54 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=54)
+diff --git a/app/handlers/handler_055.py b/app/handlers/handler_055.py
+new file mode 100644
+index 0000000..643d550
+--- /dev/null
++++ b/app/handlers/handler_055.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_055."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_055"
++SCHEMA_VERSION = 2
++
++
++def handle_step_055(event: Event) -> EventResult:
++    """Шаг 55 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_056.py b/app/handlers/handler_056.py
+new file mode 100644
+index 0000000..471b2df
+--- /dev/null
++++ b/app/handlers/handler_056.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_056."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_056"
++SCHEMA_VERSION = 3
++
++
++def handle_step_056(event: Event) -> EventResult:
++    """Шаг 56 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=56)
+diff --git a/app/handlers/handler_057.py b/app/handlers/handler_057.py
+new file mode 100644
+index 0000000..eabc1fc
+--- /dev/null
++++ b/app/handlers/handler_057.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_057."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_057"
++SCHEMA_VERSION = 1
++
++
++def handle_step_057(event: Event) -> EventResult:
++    """Шаг 57 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_058.py b/app/handlers/handler_058.py
+new file mode 100644
+index 0000000..955b972
+--- /dev/null
++++ b/app/handlers/handler_058.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_058."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_058"
++SCHEMA_VERSION = 2
++
++
++def handle_step_058(event: Event) -> EventResult:
++    """Шаг 58 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=58)
+diff --git a/app/handlers/handler_059.py b/app/handlers/handler_059.py
+new file mode 100644
+index 0000000..2d20204
+--- /dev/null
++++ b/app/handlers/handler_059.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_059."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_059"
++SCHEMA_VERSION = 3
++
++
++def handle_step_059(event: Event) -> EventResult:
++    """Шаг 59 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_060.py b/app/handlers/handler_060.py
+new file mode 100644
+index 0000000..00b7a78
+--- /dev/null
++++ b/app/handlers/handler_060.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_060."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_060"
++SCHEMA_VERSION = 1
++
++
++def handle_step_060(event: Event) -> EventResult:
++    """Шаг 60 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=60)
+diff --git a/app/handlers/handler_061.py b/app/handlers/handler_061.py
+new file mode 100644
+index 0000000..35cf968
+--- /dev/null
++++ b/app/handlers/handler_061.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_061."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_061"
++SCHEMA_VERSION = 2
++
++
++def handle_step_061(event: Event) -> EventResult:
++    """Шаг 61 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_062.py b/app/handlers/handler_062.py
+new file mode 100644
+index 0000000..01a2c50
+--- /dev/null
++++ b/app/handlers/handler_062.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_062."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_062"
++SCHEMA_VERSION = 3
++
++
++def handle_step_062(event: Event) -> EventResult:
++    """Шаг 62 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=62)
+diff --git a/app/handlers/handler_063.py b/app/handlers/handler_063.py
+new file mode 100644
+index 0000000..414951d
+--- /dev/null
++++ b/app/handlers/handler_063.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_063."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_063"
++SCHEMA_VERSION = 1
++
++
++def handle_step_063(event: Event) -> EventResult:
++    """Шаг 63 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_064.py b/app/handlers/handler_064.py
+new file mode 100644
+index 0000000..973bcec
+--- /dev/null
++++ b/app/handlers/handler_064.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_064."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_064"
++SCHEMA_VERSION = 2
++
++
++def handle_step_064(event: Event) -> EventResult:
++    """Шаг 64 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=64)
+diff --git a/app/handlers/handler_065.py b/app/handlers/handler_065.py
+new file mode 100644
+index 0000000..e303644
+--- /dev/null
++++ b/app/handlers/handler_065.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_065."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_065"
++SCHEMA_VERSION = 3
++
++
++def handle_step_065(event: Event) -> EventResult:
++    """Шаг 65 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_066.py b/app/handlers/handler_066.py
+new file mode 100644
+index 0000000..1c99082
+--- /dev/null
++++ b/app/handlers/handler_066.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_066."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_066"
++SCHEMA_VERSION = 1
++
++
++def handle_step_066(event: Event) -> EventResult:
++    """Шаг 66 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=66)
+diff --git a/app/handlers/handler_067.py b/app/handlers/handler_067.py
+new file mode 100644
+index 0000000..380d52f
+--- /dev/null
++++ b/app/handlers/handler_067.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_067."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_067"
++SCHEMA_VERSION = 2
++
++
++def handle_step_067(event: Event) -> EventResult:
++    """Шаг 67 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_068.py b/app/handlers/handler_068.py
+new file mode 100644
+index 0000000..7cc0000
+--- /dev/null
++++ b/app/handlers/handler_068.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_068."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_068"
++SCHEMA_VERSION = 3
++
++
++def handle_step_068(event: Event) -> EventResult:
++    """Шаг 68 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=68)
+diff --git a/app/handlers/handler_069.py b/app/handlers/handler_069.py
+new file mode 100644
+index 0000000..d27635a
+--- /dev/null
++++ b/app/handlers/handler_069.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_069."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_069"
++SCHEMA_VERSION = 1
++
++
++def handle_step_069(event: Event) -> EventResult:
++    """Шаг 69 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_070.py b/app/handlers/handler_070.py
+new file mode 100644
+index 0000000..4ee175b
+--- /dev/null
++++ b/app/handlers/handler_070.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_070."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_070"
++SCHEMA_VERSION = 2
++
++
++def handle_step_070(event: Event) -> EventResult:
++    """Шаг 70 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=70)
+diff --git a/app/handlers/handler_071.py b/app/handlers/handler_071.py
+new file mode 100644
+index 0000000..893daee
+--- /dev/null
++++ b/app/handlers/handler_071.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_071."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_071"
++SCHEMA_VERSION = 3
++
++
++def handle_step_071(event: Event) -> EventResult:
++    """Шаг 71 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_072.py b/app/handlers/handler_072.py
+new file mode 100644
+index 0000000..6e92ef0
+--- /dev/null
++++ b/app/handlers/handler_072.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_072."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_072"
++SCHEMA_VERSION = 1
++
++
++def handle_step_072(event: Event) -> EventResult:
++    """Шаг 72 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=72)
+diff --git a/app/handlers/handler_073.py b/app/handlers/handler_073.py
+new file mode 100644
+index 0000000..8ae998e
+--- /dev/null
++++ b/app/handlers/handler_073.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_073."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_073"
++SCHEMA_VERSION = 2
++
++
++def handle_step_073(event: Event) -> EventResult:
++    """Шаг 73 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_074.py b/app/handlers/handler_074.py
+new file mode 100644
+index 0000000..4156843
+--- /dev/null
++++ b/app/handlers/handler_074.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_074."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_074"
++SCHEMA_VERSION = 3
++
++
++def handle_step_074(event: Event) -> EventResult:
++    """Шаг 74 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=74)
+diff --git a/app/handlers/handler_075.py b/app/handlers/handler_075.py
+new file mode 100644
+index 0000000..f26b528
+--- /dev/null
++++ b/app/handlers/handler_075.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_075."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_075"
++SCHEMA_VERSION = 1
++
++
++def handle_step_075(event: Event) -> EventResult:
++    """Шаг 75 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_076.py b/app/handlers/handler_076.py
+new file mode 100644
+index 0000000..bff84f8
+--- /dev/null
++++ b/app/handlers/handler_076.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_076."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_076"
++SCHEMA_VERSION = 2
++
++
++def handle_step_076(event: Event) -> EventResult:
++    """Шаг 76 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=76)
+diff --git a/app/handlers/handler_077.py b/app/handlers/handler_077.py
+new file mode 100644
+index 0000000..939162d
+--- /dev/null
++++ b/app/handlers/handler_077.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_077."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_077"
++SCHEMA_VERSION = 3
++
++
++def handle_step_077(event: Event) -> EventResult:
++    """Шаг 77 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_078.py b/app/handlers/handler_078.py
+new file mode 100644
+index 0000000..029e663
+--- /dev/null
++++ b/app/handlers/handler_078.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_078."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_078"
++SCHEMA_VERSION = 1
++
++
++def handle_step_078(event: Event) -> EventResult:
++    """Шаг 78 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=78)
+diff --git a/app/handlers/handler_079.py b/app/handlers/handler_079.py
+new file mode 100644
+index 0000000..5eea2d9
+--- /dev/null
++++ b/app/handlers/handler_079.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_079."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_079"
++SCHEMA_VERSION = 2
++
++
++def handle_step_079(event: Event) -> EventResult:
++    """Шаг 79 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_080.py b/app/handlers/handler_080.py
+new file mode 100644
+index 0000000..4762e76
+--- /dev/null
++++ b/app/handlers/handler_080.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_080."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_080"
++SCHEMA_VERSION = 3
++
++
++def handle_step_080(event: Event) -> EventResult:
++    """Шаг 80 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=80)
+diff --git a/app/handlers/handler_081.py b/app/handlers/handler_081.py
+new file mode 100644
+index 0000000..f029b75
+--- /dev/null
++++ b/app/handlers/handler_081.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_081."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_081"
++SCHEMA_VERSION = 1
++
++
++def handle_step_081(event: Event) -> EventResult:
++    """Шаг 81 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_082.py b/app/handlers/handler_082.py
+new file mode 100644
+index 0000000..f4b1500
+--- /dev/null
++++ b/app/handlers/handler_082.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_082."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_082"
++SCHEMA_VERSION = 2
++
++
++def handle_step_082(event: Event) -> EventResult:
++    """Шаг 82 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=82)
+diff --git a/app/handlers/handler_083.py b/app/handlers/handler_083.py
+new file mode 100644
+index 0000000..82f35ee
+--- /dev/null
++++ b/app/handlers/handler_083.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_083."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_083"
++SCHEMA_VERSION = 3
++
++
++def handle_step_083(event: Event) -> EventResult:
++    """Шаг 83 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_084.py b/app/handlers/handler_084.py
+new file mode 100644
+index 0000000..8ee8c9c
+--- /dev/null
++++ b/app/handlers/handler_084.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_084."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_084"
++SCHEMA_VERSION = 1
++
++
++def handle_step_084(event: Event) -> EventResult:
++    """Шаг 84 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=84)
+diff --git a/app/handlers/handler_085.py b/app/handlers/handler_085.py
+new file mode 100644
+index 0000000..5737d6a
+--- /dev/null
++++ b/app/handlers/handler_085.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_085."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_085"
++SCHEMA_VERSION = 2
++
++
++def handle_step_085(event: Event) -> EventResult:
++    """Шаг 85 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_086.py b/app/handlers/handler_086.py
+new file mode 100644
+index 0000000..5dcf96c
+--- /dev/null
++++ b/app/handlers/handler_086.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_086."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_086"
++SCHEMA_VERSION = 3
++
++
++def handle_step_086(event: Event) -> EventResult:
++    """Шаг 86 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=86)
+diff --git a/app/handlers/handler_087.py b/app/handlers/handler_087.py
+new file mode 100644
+index 0000000..feb30ed
+--- /dev/null
++++ b/app/handlers/handler_087.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_087."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_087"
++SCHEMA_VERSION = 1
++
++
++def handle_step_087(event: Event) -> EventResult:
++    """Шаг 87 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_088.py b/app/handlers/handler_088.py
+new file mode 100644
+index 0000000..3734c30
+--- /dev/null
++++ b/app/handlers/handler_088.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_088."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_088"
++SCHEMA_VERSION = 2
++
++
++def handle_step_088(event: Event) -> EventResult:
++    """Шаг 88 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=88)
+diff --git a/app/handlers/handler_089.py b/app/handlers/handler_089.py
+new file mode 100644
+index 0000000..d6581b9
+--- /dev/null
++++ b/app/handlers/handler_089.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_089."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_089"
++SCHEMA_VERSION = 3
++
++
++def handle_step_089(event: Event) -> EventResult:
++    """Шаг 89 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_090.py b/app/handlers/handler_090.py
+new file mode 100644
+index 0000000..a497335
+--- /dev/null
++++ b/app/handlers/handler_090.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_090."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_090"
++SCHEMA_VERSION = 1
++
++
++def handle_step_090(event: Event) -> EventResult:
++    """Шаг 90 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=90)
+diff --git a/app/handlers/handler_091.py b/app/handlers/handler_091.py
+new file mode 100644
+index 0000000..9f34cba
+--- /dev/null
++++ b/app/handlers/handler_091.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_091."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_091"
++SCHEMA_VERSION = 2
++
++
++def handle_step_091(event: Event) -> EventResult:
++    """Шаг 91 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_092.py b/app/handlers/handler_092.py
+new file mode 100644
+index 0000000..e46d043
+--- /dev/null
++++ b/app/handlers/handler_092.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_092."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_092"
++SCHEMA_VERSION = 3
++
++
++def handle_step_092(event: Event) -> EventResult:
++    """Шаг 92 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=92)
+diff --git a/app/handlers/handler_093.py b/app/handlers/handler_093.py
+new file mode 100644
+index 0000000..a47ea75
+--- /dev/null
++++ b/app/handlers/handler_093.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_093."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_093"
++SCHEMA_VERSION = 1
++
++
++def handle_step_093(event: Event) -> EventResult:
++    """Шаг 93 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_094.py b/app/handlers/handler_094.py
+new file mode 100644
+index 0000000..ceacc79
+--- /dev/null
++++ b/app/handlers/handler_094.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_094."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_094"
++SCHEMA_VERSION = 2
++
++
++def handle_step_094(event: Event) -> EventResult:
++    """Шаг 94 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=94)
+diff --git a/app/handlers/handler_095.py b/app/handlers/handler_095.py
+new file mode 100644
+index 0000000..b164f04
+--- /dev/null
++++ b/app/handlers/handler_095.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_095."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_095"
++SCHEMA_VERSION = 3
++
++
++def handle_step_095(event: Event) -> EventResult:
++    """Шаг 95 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_096.py b/app/handlers/handler_096.py
+new file mode 100644
+index 0000000..8711908
+--- /dev/null
++++ b/app/handlers/handler_096.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_096."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_096"
++SCHEMA_VERSION = 1
++
++
++def handle_step_096(event: Event) -> EventResult:
++    """Шаг 96 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=96)
+diff --git a/app/handlers/handler_097.py b/app/handlers/handler_097.py
+new file mode 100644
+index 0000000..64501d8
+--- /dev/null
++++ b/app/handlers/handler_097.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_097."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_097"
++SCHEMA_VERSION = 2
++
++
++def handle_step_097(event: Event) -> EventResult:
++    """Шаг 97 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_098.py b/app/handlers/handler_098.py
+new file mode 100644
+index 0000000..f6207b1
+--- /dev/null
++++ b/app/handlers/handler_098.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_098."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_098"
++SCHEMA_VERSION = 3
++
++
++def handle_step_098(event: Event) -> EventResult:
++    """Шаг 98 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=98)
+diff --git a/app/handlers/handler_099.py b/app/handlers/handler_099.py
+new file mode 100644
+index 0000000..b8d951e
+--- /dev/null
++++ b/app/handlers/handler_099.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_099."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_099"
++SCHEMA_VERSION = 1
++
++
++def handle_step_099(event: Event) -> EventResult:
++    """Шаг 99 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_100.py b/app/handlers/handler_100.py
+new file mode 100644
+index 0000000..f00adf5
+--- /dev/null
++++ b/app/handlers/handler_100.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_100."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_100"
++SCHEMA_VERSION = 2
++
++
++def handle_step_100(event: Event) -> EventResult:
++    """Шаг 100 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=100)
+diff --git a/app/handlers/handler_101.py b/app/handlers/handler_101.py
+new file mode 100644
+index 0000000..9631775
+--- /dev/null
++++ b/app/handlers/handler_101.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_101."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_101"
++SCHEMA_VERSION = 3
++
++
++def handle_step_101(event: Event) -> EventResult:
++    """Шаг 101 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_102.py b/app/handlers/handler_102.py
+new file mode 100644
+index 0000000..ec25cf0
+--- /dev/null
++++ b/app/handlers/handler_102.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_102."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_102"
++SCHEMA_VERSION = 1
++
++
++def handle_step_102(event: Event) -> EventResult:
++    """Шаг 102 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=102)
+diff --git a/app/handlers/handler_103.py b/app/handlers/handler_103.py
+new file mode 100644
+index 0000000..5dddad4
+--- /dev/null
++++ b/app/handlers/handler_103.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_103."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_103"
++SCHEMA_VERSION = 2
++
++
++def handle_step_103(event: Event) -> EventResult:
++    """Шаг 103 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_104.py b/app/handlers/handler_104.py
+new file mode 100644
+index 0000000..4bed481
+--- /dev/null
++++ b/app/handlers/handler_104.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_104."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_104"
++SCHEMA_VERSION = 3
++
++
++def handle_step_104(event: Event) -> EventResult:
++    """Шаг 104 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=104)
+diff --git a/app/handlers/handler_105.py b/app/handlers/handler_105.py
+new file mode 100644
+index 0000000..5b86a45
+--- /dev/null
++++ b/app/handlers/handler_105.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_105."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_105"
++SCHEMA_VERSION = 1
++
++
++def handle_step_105(event: Event) -> EventResult:
++    """Шаг 105 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_106.py b/app/handlers/handler_106.py
+new file mode 100644
+index 0000000..bfaca8f
+--- /dev/null
++++ b/app/handlers/handler_106.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_106."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_106"
++SCHEMA_VERSION = 2
++
++
++def handle_step_106(event: Event) -> EventResult:
++    """Шаг 106 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=106)
+diff --git a/app/handlers/handler_107.py b/app/handlers/handler_107.py
+new file mode 100644
+index 0000000..2f42f1b
+--- /dev/null
++++ b/app/handlers/handler_107.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_107."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_107"
++SCHEMA_VERSION = 3
++
++
++def handle_step_107(event: Event) -> EventResult:
++    """Шаг 107 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_108.py b/app/handlers/handler_108.py
+new file mode 100644
+index 0000000..5361a4d
+--- /dev/null
++++ b/app/handlers/handler_108.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_108."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_108"
++SCHEMA_VERSION = 1
++
++
++def handle_step_108(event: Event) -> EventResult:
++    """Шаг 108 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=108)
+diff --git a/app/handlers/handler_109.py b/app/handlers/handler_109.py
+new file mode 100644
+index 0000000..275f3d0
+--- /dev/null
++++ b/app/handlers/handler_109.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_109."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_109"
++SCHEMA_VERSION = 2
++
++
++def handle_step_109(event: Event) -> EventResult:
++    """Шаг 109 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_110.py b/app/handlers/handler_110.py
+new file mode 100644
+index 0000000..e66573b
+--- /dev/null
++++ b/app/handlers/handler_110.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_110."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_110"
++SCHEMA_VERSION = 3
++
++
++def handle_step_110(event: Event) -> EventResult:
++    """Шаг 110 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=110)
+diff --git a/app/handlers/handler_111.py b/app/handlers/handler_111.py
+new file mode 100644
+index 0000000..eaba775
+--- /dev/null
++++ b/app/handlers/handler_111.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_111."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_111"
++SCHEMA_VERSION = 1
++
++
++def handle_step_111(event: Event) -> EventResult:
++    """Шаг 111 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_112.py b/app/handlers/handler_112.py
+new file mode 100644
+index 0000000..fdac60c
+--- /dev/null
++++ b/app/handlers/handler_112.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_112."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_112"
++SCHEMA_VERSION = 2
++
++
++def handle_step_112(event: Event) -> EventResult:
++    """Шаг 112 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=112)
+diff --git a/app/handlers/handler_113.py b/app/handlers/handler_113.py
+new file mode 100644
+index 0000000..24e2419
+--- /dev/null
++++ b/app/handlers/handler_113.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_113."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_113"
++SCHEMA_VERSION = 3
++
++
++def handle_step_113(event: Event) -> EventResult:
++    """Шаг 113 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_114.py b/app/handlers/handler_114.py
+new file mode 100644
+index 0000000..17e2bb0
+--- /dev/null
++++ b/app/handlers/handler_114.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_114."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_114"
++SCHEMA_VERSION = 1
++
++
++def handle_step_114(event: Event) -> EventResult:
++    """Шаг 114 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=114)
+diff --git a/app/handlers/handler_115.py b/app/handlers/handler_115.py
+new file mode 100644
+index 0000000..370d8d2
+--- /dev/null
++++ b/app/handlers/handler_115.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_115."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_115"
++SCHEMA_VERSION = 2
++
++
++def handle_step_115(event: Event) -> EventResult:
++    """Шаг 115 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_116.py b/app/handlers/handler_116.py
+new file mode 100644
+index 0000000..32fba0f
+--- /dev/null
++++ b/app/handlers/handler_116.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_116."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_116"
++SCHEMA_VERSION = 3
++
++
++def handle_step_116(event: Event) -> EventResult:
++    """Шаг 116 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=116)
+diff --git a/app/handlers/handler_117.py b/app/handlers/handler_117.py
+new file mode 100644
+index 0000000..4a04e9e
+--- /dev/null
++++ b/app/handlers/handler_117.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_117."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_117"
++SCHEMA_VERSION = 1
++
++
++def handle_step_117(event: Event) -> EventResult:
++    """Шаг 117 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_118.py b/app/handlers/handler_118.py
+new file mode 100644
+index 0000000..895b6ff
+--- /dev/null
++++ b/app/handlers/handler_118.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_118."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_118"
++SCHEMA_VERSION = 2
++
++
++def handle_step_118(event: Event) -> EventResult:
++    """Шаг 118 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=118)
+diff --git a/app/handlers/handler_119.py b/app/handlers/handler_119.py
+new file mode 100644
+index 0000000..a1fbc64
+--- /dev/null
++++ b/app/handlers/handler_119.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_119."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_119"
++SCHEMA_VERSION = 3
++
++
++def handle_step_119(event: Event) -> EventResult:
++    """Шаг 119 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_120.py b/app/handlers/handler_120.py
+new file mode 100644
+index 0000000..6595545
+--- /dev/null
++++ b/app/handlers/handler_120.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_120."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_120"
++SCHEMA_VERSION = 1
++
++
++def handle_step_120(event: Event) -> EventResult:
++    """Шаг 120 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=120)
+diff --git a/app/handlers/handler_121.py b/app/handlers/handler_121.py
+new file mode 100644
+index 0000000..1b9b998
+--- /dev/null
++++ b/app/handlers/handler_121.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_121."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_121"
++SCHEMA_VERSION = 2
++
++
++def handle_step_121(event: Event) -> EventResult:
++    """Шаг 121 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_122.py b/app/handlers/handler_122.py
+new file mode 100644
+index 0000000..d58dec9
+--- /dev/null
++++ b/app/handlers/handler_122.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_122."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_122"
++SCHEMA_VERSION = 3
++
++
++def handle_step_122(event: Event) -> EventResult:
++    """Шаг 122 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=122)
+diff --git a/app/handlers/handler_123.py b/app/handlers/handler_123.py
+new file mode 100644
+index 0000000..031aa18
+--- /dev/null
++++ b/app/handlers/handler_123.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_123."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_123"
++SCHEMA_VERSION = 1
++
++
++def handle_step_123(event: Event) -> EventResult:
++    """Шаг 123 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_124.py b/app/handlers/handler_124.py
+new file mode 100644
+index 0000000..482ef25
+--- /dev/null
++++ b/app/handlers/handler_124.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_124."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_124"
++SCHEMA_VERSION = 2
++
++
++def handle_step_124(event: Event) -> EventResult:
++    """Шаг 124 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=124)
+diff --git a/app/handlers/handler_125.py b/app/handlers/handler_125.py
+new file mode 100644
+index 0000000..ff3c0d8
+--- /dev/null
++++ b/app/handlers/handler_125.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_125."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_125"
++SCHEMA_VERSION = 3
++
++
++def handle_step_125(event: Event) -> EventResult:
++    """Шаг 125 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_126.py b/app/handlers/handler_126.py
+new file mode 100644
+index 0000000..3c506e2
+--- /dev/null
++++ b/app/handlers/handler_126.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_126."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_126"
++SCHEMA_VERSION = 1
++
++
++def handle_step_126(event: Event) -> EventResult:
++    """Шаг 126 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=126)
+diff --git a/app/handlers/handler_127.py b/app/handlers/handler_127.py
+new file mode 100644
+index 0000000..03f7ea3
+--- /dev/null
++++ b/app/handlers/handler_127.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_127."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_127"
++SCHEMA_VERSION = 2
++
++
++def handle_step_127(event: Event) -> EventResult:
++    """Шаг 127 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_128.py b/app/handlers/handler_128.py
+new file mode 100644
+index 0000000..9ce61f9
+--- /dev/null
++++ b/app/handlers/handler_128.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_128."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_128"
++SCHEMA_VERSION = 3
++
++
++def handle_step_128(event: Event) -> EventResult:
++    """Шаг 128 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=128)
+diff --git a/app/handlers/handler_129.py b/app/handlers/handler_129.py
+new file mode 100644
+index 0000000..e8c0d9d
+--- /dev/null
++++ b/app/handlers/handler_129.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_129."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_129"
++SCHEMA_VERSION = 1
++
++
++def handle_step_129(event: Event) -> EventResult:
++    """Шаг 129 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_130.py b/app/handlers/handler_130.py
+new file mode 100644
+index 0000000..5bdf26f
+--- /dev/null
++++ b/app/handlers/handler_130.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_130."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_130"
++SCHEMA_VERSION = 2
++
++
++def handle_step_130(event: Event) -> EventResult:
++    """Шаг 130 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=130)
+diff --git a/app/handlers/handler_131.py b/app/handlers/handler_131.py
+new file mode 100644
+index 0000000..a144f0a
+--- /dev/null
++++ b/app/handlers/handler_131.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_131."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_131"
++SCHEMA_VERSION = 3
++
++
++def handle_step_131(event: Event) -> EventResult:
++    """Шаг 131 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_132.py b/app/handlers/handler_132.py
+new file mode 100644
+index 0000000..3584124
+--- /dev/null
++++ b/app/handlers/handler_132.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_132."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_132"
++SCHEMA_VERSION = 1
++
++
++def handle_step_132(event: Event) -> EventResult:
++    """Шаг 132 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=132)
+diff --git a/app/handlers/handler_133.py b/app/handlers/handler_133.py
+new file mode 100644
+index 0000000..def4dbf
+--- /dev/null
++++ b/app/handlers/handler_133.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_133."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_133"
++SCHEMA_VERSION = 2
++
++
++def handle_step_133(event: Event) -> EventResult:
++    """Шаг 133 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_134.py b/app/handlers/handler_134.py
+new file mode 100644
+index 0000000..69f17fe
+--- /dev/null
++++ b/app/handlers/handler_134.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_134."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_134"
++SCHEMA_VERSION = 3
++
++
++def handle_step_134(event: Event) -> EventResult:
++    """Шаг 134 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=134)
+diff --git a/app/handlers/handler_135.py b/app/handlers/handler_135.py
+new file mode 100644
+index 0000000..76fec30
+--- /dev/null
++++ b/app/handlers/handler_135.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_135."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_135"
++SCHEMA_VERSION = 1
++
++
++def handle_step_135(event: Event) -> EventResult:
++    """Шаг 135 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_136.py b/app/handlers/handler_136.py
+new file mode 100644
+index 0000000..130be1f
+--- /dev/null
++++ b/app/handlers/handler_136.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_136."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_136"
++SCHEMA_VERSION = 2
++
++
++def handle_step_136(event: Event) -> EventResult:
++    """Шаг 136 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=136)
+diff --git a/app/handlers/handler_137.py b/app/handlers/handler_137.py
+new file mode 100644
+index 0000000..e792ef8
+--- /dev/null
++++ b/app/handlers/handler_137.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_137."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_137"
++SCHEMA_VERSION = 3
++
++
++def handle_step_137(event: Event) -> EventResult:
++    """Шаг 137 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_138.py b/app/handlers/handler_138.py
+new file mode 100644
+index 0000000..4a45669
+--- /dev/null
++++ b/app/handlers/handler_138.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_138."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_138"
++SCHEMA_VERSION = 1
++
++
++def handle_step_138(event: Event) -> EventResult:
++    """Шаг 138 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=138)
+diff --git a/app/handlers/handler_139.py b/app/handlers/handler_139.py
+new file mode 100644
+index 0000000..326bec5
+--- /dev/null
++++ b/app/handlers/handler_139.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_139."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_139"
++SCHEMA_VERSION = 2
++
++
++def handle_step_139(event: Event) -> EventResult:
++    """Шаг 139 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_140.py b/app/handlers/handler_140.py
+new file mode 100644
+index 0000000..bb1e4b1
+--- /dev/null
++++ b/app/handlers/handler_140.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_140."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_140"
++SCHEMA_VERSION = 3
++
++
++def handle_step_140(event: Event) -> EventResult:
++    """Шаг 140 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=140)
+diff --git a/app/handlers/handler_141.py b/app/handlers/handler_141.py
+new file mode 100644
+index 0000000..a979ee9
+--- /dev/null
++++ b/app/handlers/handler_141.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_141."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_141"
++SCHEMA_VERSION = 1
++
++
++def handle_step_141(event: Event) -> EventResult:
++    """Шаг 141 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_142.py b/app/handlers/handler_142.py
+new file mode 100644
+index 0000000..7a9197f
+--- /dev/null
++++ b/app/handlers/handler_142.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_142."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_142"
++SCHEMA_VERSION = 2
++
++
++def handle_step_142(event: Event) -> EventResult:
++    """Шаг 142 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=142)
+diff --git a/app/handlers/handler_143.py b/app/handlers/handler_143.py
+new file mode 100644
+index 0000000..cfacd2a
+--- /dev/null
++++ b/app/handlers/handler_143.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_143."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_143"
++SCHEMA_VERSION = 3
++
++
++def handle_step_143(event: Event) -> EventResult:
++    """Шаг 143 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_144.py b/app/handlers/handler_144.py
+new file mode 100644
+index 0000000..3721b85
+--- /dev/null
++++ b/app/handlers/handler_144.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_144."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_144"
++SCHEMA_VERSION = 1
++
++
++def handle_step_144(event: Event) -> EventResult:
++    """Шаг 144 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=144)
+diff --git a/app/handlers/handler_145.py b/app/handlers/handler_145.py
+new file mode 100644
+index 0000000..86f4cde
+--- /dev/null
++++ b/app/handlers/handler_145.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_145."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_145"
++SCHEMA_VERSION = 2
++
++
++def handle_step_145(event: Event) -> EventResult:
++    """Шаг 145 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_146.py b/app/handlers/handler_146.py
+new file mode 100644
+index 0000000..9f0c2d5
+--- /dev/null
++++ b/app/handlers/handler_146.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_146."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_146"
++SCHEMA_VERSION = 3
++
++
++def handle_step_146(event: Event) -> EventResult:
++    """Шаг 146 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=146)
+diff --git a/app/handlers/handler_147.py b/app/handlers/handler_147.py
+new file mode 100644
+index 0000000..46721a8
+--- /dev/null
++++ b/app/handlers/handler_147.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_147."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_147"
++SCHEMA_VERSION = 1
++
++
++def handle_step_147(event: Event) -> EventResult:
++    """Шаг 147 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_148.py b/app/handlers/handler_148.py
+new file mode 100644
+index 0000000..fea05a2
+--- /dev/null
++++ b/app/handlers/handler_148.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_148."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_148"
++SCHEMA_VERSION = 2
++
++
++def handle_step_148(event: Event) -> EventResult:
++    """Шаг 148 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=148)
+diff --git a/app/handlers/handler_149.py b/app/handlers/handler_149.py
+new file mode 100644
+index 0000000..ab0e318
+--- /dev/null
++++ b/app/handlers/handler_149.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_149."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_149"
++SCHEMA_VERSION = 3
++
++
++def handle_step_149(event: Event) -> EventResult:
++    """Шаг 149 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_150.py b/app/handlers/handler_150.py
+new file mode 100644
+index 0000000..848c78c
+--- /dev/null
++++ b/app/handlers/handler_150.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_150."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_150"
++SCHEMA_VERSION = 1
++
++
++def handle_step_150(event: Event) -> EventResult:
++    """Шаг 150 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=150)
+diff --git a/app/handlers/handler_151.py b/app/handlers/handler_151.py
+new file mode 100644
+index 0000000..57595f2
+--- /dev/null
++++ b/app/handlers/handler_151.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_151."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_151"
++SCHEMA_VERSION = 2
++
++
++def handle_step_151(event: Event) -> EventResult:
++    """Шаг 151 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_152.py b/app/handlers/handler_152.py
+new file mode 100644
+index 0000000..3f2611b
+--- /dev/null
++++ b/app/handlers/handler_152.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_152."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_152"
++SCHEMA_VERSION = 3
++
++
++def handle_step_152(event: Event) -> EventResult:
++    """Шаг 152 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=152)
+diff --git a/app/handlers/handler_153.py b/app/handlers/handler_153.py
+new file mode 100644
+index 0000000..335371c
+--- /dev/null
++++ b/app/handlers/handler_153.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_153."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_153"
++SCHEMA_VERSION = 1
++
++
++def handle_step_153(event: Event) -> EventResult:
++    """Шаг 153 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_154.py b/app/handlers/handler_154.py
+new file mode 100644
+index 0000000..4dfc3a2
+--- /dev/null
++++ b/app/handlers/handler_154.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_154."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_154"
++SCHEMA_VERSION = 2
++
++
++def handle_step_154(event: Event) -> EventResult:
++    """Шаг 154 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=154)
+diff --git a/app/handlers/handler_155.py b/app/handlers/handler_155.py
+new file mode 100644
+index 0000000..4047ae7
+--- /dev/null
++++ b/app/handlers/handler_155.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_155."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_155"
++SCHEMA_VERSION = 3
++
++
++def handle_step_155(event: Event) -> EventResult:
++    """Шаг 155 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_156.py b/app/handlers/handler_156.py
+new file mode 100644
+index 0000000..87a0605
+--- /dev/null
++++ b/app/handlers/handler_156.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_156."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_156"
++SCHEMA_VERSION = 1
++
++
++def handle_step_156(event: Event) -> EventResult:
++    """Шаг 156 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=156)
+diff --git a/app/handlers/handler_157.py b/app/handlers/handler_157.py
+new file mode 100644
+index 0000000..8b1d68b
+--- /dev/null
++++ b/app/handlers/handler_157.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_157."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_157"
++SCHEMA_VERSION = 2
++
++
++def handle_step_157(event: Event) -> EventResult:
++    """Шаг 157 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_158.py b/app/handlers/handler_158.py
+new file mode 100644
+index 0000000..e18c96a
+--- /dev/null
++++ b/app/handlers/handler_158.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_158."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_158"
++SCHEMA_VERSION = 3
++
++
++def handle_step_158(event: Event) -> EventResult:
++    """Шаг 158 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=158)
+diff --git a/app/handlers/handler_159.py b/app/handlers/handler_159.py
+new file mode 100644
+index 0000000..2aa5895
+--- /dev/null
++++ b/app/handlers/handler_159.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_159."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_159"
++SCHEMA_VERSION = 1
++
++
++def handle_step_159(event: Event) -> EventResult:
++    """Шаг 159 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_160.py b/app/handlers/handler_160.py
+new file mode 100644
+index 0000000..d97adb5
+--- /dev/null
++++ b/app/handlers/handler_160.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_160."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_160"
++SCHEMA_VERSION = 2
++
++
++def handle_step_160(event: Event) -> EventResult:
++    """Шаг 160 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=160)
+diff --git a/app/handlers/handler_161.py b/app/handlers/handler_161.py
+new file mode 100644
+index 0000000..75c0f2a
+--- /dev/null
++++ b/app/handlers/handler_161.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_161."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_161"
++SCHEMA_VERSION = 3
++
++
++def handle_step_161(event: Event) -> EventResult:
++    """Шаг 161 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_162.py b/app/handlers/handler_162.py
+new file mode 100644
+index 0000000..8560bd3
+--- /dev/null
++++ b/app/handlers/handler_162.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_162."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_162"
++SCHEMA_VERSION = 1
++
++
++def handle_step_162(event: Event) -> EventResult:
++    """Шаг 162 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=162)
+diff --git a/app/handlers/handler_163.py b/app/handlers/handler_163.py
+new file mode 100644
+index 0000000..58aa3ca
+--- /dev/null
++++ b/app/handlers/handler_163.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_163."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_163"
++SCHEMA_VERSION = 2
++
++
++def handle_step_163(event: Event) -> EventResult:
++    """Шаг 163 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_164.py b/app/handlers/handler_164.py
+new file mode 100644
+index 0000000..78c4a43
+--- /dev/null
++++ b/app/handlers/handler_164.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_164."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_164"
++SCHEMA_VERSION = 3
++
++
++def handle_step_164(event: Event) -> EventResult:
++    """Шаг 164 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=164)
+diff --git a/app/handlers/handler_165.py b/app/handlers/handler_165.py
+new file mode 100644
+index 0000000..27b65fa
+--- /dev/null
++++ b/app/handlers/handler_165.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_165."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_165"
++SCHEMA_VERSION = 1
++
++
++def handle_step_165(event: Event) -> EventResult:
++    """Шаг 165 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_166.py b/app/handlers/handler_166.py
+new file mode 100644
+index 0000000..1c862f0
+--- /dev/null
++++ b/app/handlers/handler_166.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_166."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_166"
++SCHEMA_VERSION = 2
++
++
++def handle_step_166(event: Event) -> EventResult:
++    """Шаг 166 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=166)
+diff --git a/app/handlers/handler_167.py b/app/handlers/handler_167.py
+new file mode 100644
+index 0000000..3181494
+--- /dev/null
++++ b/app/handlers/handler_167.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_167."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_167"
++SCHEMA_VERSION = 3
++
++
++def handle_step_167(event: Event) -> EventResult:
++    """Шаг 167 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_168.py b/app/handlers/handler_168.py
+new file mode 100644
+index 0000000..870ee31
+--- /dev/null
++++ b/app/handlers/handler_168.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_168."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_168"
++SCHEMA_VERSION = 1
++
++
++def handle_step_168(event: Event) -> EventResult:
++    """Шаг 168 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=168)
+diff --git a/app/handlers/handler_169.py b/app/handlers/handler_169.py
+new file mode 100644
+index 0000000..af78101
+--- /dev/null
++++ b/app/handlers/handler_169.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_169."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_169"
++SCHEMA_VERSION = 2
++
++
++def handle_step_169(event: Event) -> EventResult:
++    """Шаг 169 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_170.py b/app/handlers/handler_170.py
+new file mode 100644
+index 0000000..9a210e3
+--- /dev/null
++++ b/app/handlers/handler_170.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_170."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_170"
++SCHEMA_VERSION = 3
++
++
++def handle_step_170(event: Event) -> EventResult:
++    """Шаг 170 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=170)
+diff --git a/app/handlers/handler_171.py b/app/handlers/handler_171.py
+new file mode 100644
+index 0000000..c054679
+--- /dev/null
++++ b/app/handlers/handler_171.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_171."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_171"
++SCHEMA_VERSION = 1
++
++
++def handle_step_171(event: Event) -> EventResult:
++    """Шаг 171 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_172.py b/app/handlers/handler_172.py
+new file mode 100644
+index 0000000..11dc808
+--- /dev/null
++++ b/app/handlers/handler_172.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_172."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_172"
++SCHEMA_VERSION = 2
++
++
++def handle_step_172(event: Event) -> EventResult:
++    """Шаг 172 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=172)
+diff --git a/app/handlers/handler_173.py b/app/handlers/handler_173.py
+new file mode 100644
+index 0000000..e85bad8
+--- /dev/null
++++ b/app/handlers/handler_173.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_173."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_173"
++SCHEMA_VERSION = 3
++
++
++def handle_step_173(event: Event) -> EventResult:
++    """Шаг 173 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_174.py b/app/handlers/handler_174.py
+new file mode 100644
+index 0000000..e8bb656
+--- /dev/null
++++ b/app/handlers/handler_174.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_174."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_174"
++SCHEMA_VERSION = 1
++
++
++def handle_step_174(event: Event) -> EventResult:
++    """Шаг 174 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=174)
+diff --git a/app/handlers/handler_175.py b/app/handlers/handler_175.py
+new file mode 100644
+index 0000000..655d726
+--- /dev/null
++++ b/app/handlers/handler_175.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_175."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_175"
++SCHEMA_VERSION = 2
++
++
++def handle_step_175(event: Event) -> EventResult:
++    """Шаг 175 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_176.py b/app/handlers/handler_176.py
+new file mode 100644
+index 0000000..2251c01
+--- /dev/null
++++ b/app/handlers/handler_176.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_176."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_176"
++SCHEMA_VERSION = 3
++
++
++def handle_step_176(event: Event) -> EventResult:
++    """Шаг 176 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=176)
+diff --git a/app/handlers/handler_177.py b/app/handlers/handler_177.py
+new file mode 100644
+index 0000000..560f87b
+--- /dev/null
++++ b/app/handlers/handler_177.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_177."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_177"
++SCHEMA_VERSION = 1
++
++
++def handle_step_177(event: Event) -> EventResult:
++    """Шаг 177 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_178.py b/app/handlers/handler_178.py
+new file mode 100644
+index 0000000..b80536d
+--- /dev/null
++++ b/app/handlers/handler_178.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_178."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_178"
++SCHEMA_VERSION = 2
++
++
++def handle_step_178(event: Event) -> EventResult:
++    """Шаг 178 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=178)
+diff --git a/app/handlers/handler_179.py b/app/handlers/handler_179.py
+new file mode 100644
+index 0000000..12f11c9
+--- /dev/null
++++ b/app/handlers/handler_179.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_179."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_179"
++SCHEMA_VERSION = 3
++
++
++def handle_step_179(event: Event) -> EventResult:
++    """Шаг 179 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_180.py b/app/handlers/handler_180.py
+new file mode 100644
+index 0000000..f3500af
+--- /dev/null
++++ b/app/handlers/handler_180.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_180."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_180"
++SCHEMA_VERSION = 1
++
++
++def handle_step_180(event: Event) -> EventResult:
++    """Шаг 180 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=180)
+diff --git a/app/handlers/handler_181.py b/app/handlers/handler_181.py
+new file mode 100644
+index 0000000..5902afc
+--- /dev/null
++++ b/app/handlers/handler_181.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_181."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_181"
++SCHEMA_VERSION = 2
++
++
++def handle_step_181(event: Event) -> EventResult:
++    """Шаг 181 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_182.py b/app/handlers/handler_182.py
+new file mode 100644
+index 0000000..4ac9a63
+--- /dev/null
++++ b/app/handlers/handler_182.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_182."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_182"
++SCHEMA_VERSION = 3
++
++
++def handle_step_182(event: Event) -> EventResult:
++    """Шаг 182 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=182)
+diff --git a/app/handlers/handler_183.py b/app/handlers/handler_183.py
+new file mode 100644
+index 0000000..92960ab
+--- /dev/null
++++ b/app/handlers/handler_183.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_183."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_183"
++SCHEMA_VERSION = 1
++
++
++def handle_step_183(event: Event) -> EventResult:
++    """Шаг 183 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_184.py b/app/handlers/handler_184.py
+new file mode 100644
+index 0000000..7974d07
+--- /dev/null
++++ b/app/handlers/handler_184.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_184."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_184"
++SCHEMA_VERSION = 2
++
++
++def handle_step_184(event: Event) -> EventResult:
++    """Шаг 184 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=184)
+diff --git a/app/handlers/handler_185.py b/app/handlers/handler_185.py
+new file mode 100644
+index 0000000..ba01fed
+--- /dev/null
++++ b/app/handlers/handler_185.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_185."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_185"
++SCHEMA_VERSION = 3
++
++
++def handle_step_185(event: Event) -> EventResult:
++    """Шаг 185 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_186.py b/app/handlers/handler_186.py
+new file mode 100644
+index 0000000..e917326
+--- /dev/null
++++ b/app/handlers/handler_186.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_186."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_186"
++SCHEMA_VERSION = 1
++
++
++def handle_step_186(event: Event) -> EventResult:
++    """Шаг 186 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=186)
+diff --git a/app/handlers/handler_187.py b/app/handlers/handler_187.py
+new file mode 100644
+index 0000000..0d123b6
+--- /dev/null
++++ b/app/handlers/handler_187.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_187."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_187"
++SCHEMA_VERSION = 2
++
++
++def handle_step_187(event: Event) -> EventResult:
++    """Шаг 187 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_188.py b/app/handlers/handler_188.py
+new file mode 100644
+index 0000000..323718f
+--- /dev/null
++++ b/app/handlers/handler_188.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_188."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_188"
++SCHEMA_VERSION = 3
++
++
++def handle_step_188(event: Event) -> EventResult:
++    """Шаг 188 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=188)
+diff --git a/app/handlers/handler_189.py b/app/handlers/handler_189.py
+new file mode 100644
+index 0000000..e2c4d5c
+--- /dev/null
++++ b/app/handlers/handler_189.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_189."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_189"
++SCHEMA_VERSION = 1
++
++
++def handle_step_189(event: Event) -> EventResult:
++    """Шаг 189 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_190.py b/app/handlers/handler_190.py
+new file mode 100644
+index 0000000..5c58d76
+--- /dev/null
++++ b/app/handlers/handler_190.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_190."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_190"
++SCHEMA_VERSION = 2
++
++
++def handle_step_190(event: Event) -> EventResult:
++    """Шаг 190 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=190)
+diff --git a/app/handlers/handler_191.py b/app/handlers/handler_191.py
+new file mode 100644
+index 0000000..5008b3c
+--- /dev/null
++++ b/app/handlers/handler_191.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_191."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_191"
++SCHEMA_VERSION = 3
++
++
++def handle_step_191(event: Event) -> EventResult:
++    """Шаг 191 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_192.py b/app/handlers/handler_192.py
+new file mode 100644
+index 0000000..a76fcd2
+--- /dev/null
++++ b/app/handlers/handler_192.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_192."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_192"
++SCHEMA_VERSION = 1
++
++
++def handle_step_192(event: Event) -> EventResult:
++    """Шаг 192 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=192)
+diff --git a/app/handlers/handler_193.py b/app/handlers/handler_193.py
+new file mode 100644
+index 0000000..8b67cc3
+--- /dev/null
++++ b/app/handlers/handler_193.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_193."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_193"
++SCHEMA_VERSION = 2
++
++
++def handle_step_193(event: Event) -> EventResult:
++    """Шаг 193 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_194.py b/app/handlers/handler_194.py
+new file mode 100644
+index 0000000..b7ea63a
+--- /dev/null
++++ b/app/handlers/handler_194.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_194."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_194"
++SCHEMA_VERSION = 3
++
++
++def handle_step_194(event: Event) -> EventResult:
++    """Шаг 194 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=194)
+diff --git a/app/handlers/handler_195.py b/app/handlers/handler_195.py
+new file mode 100644
+index 0000000..b5b46f6
+--- /dev/null
++++ b/app/handlers/handler_195.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_195."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_195"
++SCHEMA_VERSION = 1
++
++
++def handle_step_195(event: Event) -> EventResult:
++    """Шаг 195 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/handlers/handler_196.py b/app/handlers/handler_196.py
+new file mode 100644
+index 0000000..905529b
+--- /dev/null
++++ b/app/handlers/handler_196.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_196."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_196"
++SCHEMA_VERSION = 2
++
++
++def handle_step_196(event: Event) -> EventResult:
++    """Шаг 196 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    order_id = event.payload.order_id
++    return EventResult.forward(EVENT_TYPE, order_id=order_id, step=196)
+diff --git a/app/handlers/handler_197.py b/app/handlers/handler_197.py
+new file mode 100644
+index 0000000..50ff744
+--- /dev/null
++++ b/app/handlers/handler_197.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_197."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_197"
++SCHEMA_VERSION = 3
++
++
++def handle_step_197(event: Event) -> EventResult:
++    """Шаг 197 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    labels = sorted(set(event.payload.labels))
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, labels=labels)
+diff --git a/app/handlers/handler_198.py b/app/handlers/handler_198.py
+new file mode 100644
+index 0000000..ee10c1d
+--- /dev/null
++++ b/app/handlers/handler_198.py
+@@ -0,0 +1,18 @@
++"""Обработчик события order.step_198."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_198"
++SCHEMA_VERSION = 1
++
++
++def handle_step_198(event: Event) -> EventResult:
++    """Шаг 198 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    if event.payload.cancelled:
++        return EventResult.done(EVENT_TYPE, reason="заказ отменён")
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, step=198)
+diff --git a/app/handlers/handler_199.py b/app/handlers/handler_199.py
+new file mode 100644
+index 0000000..c599789
+--- /dev/null
++++ b/app/handlers/handler_199.py
+@@ -0,0 +1,17 @@
++"""Обработчик события order.step_199."""
++
++from app.events import Event, EventResult
++
++EVENT_TYPE = "order.step_199"
++SCHEMA_VERSION = 2
++
++
++def handle_step_199(event: Event) -> EventResult:
++    """Шаг 199 конвейера заказа: проверяет версию схемы и передаёт данные дальше."""
++    if event.type != EVENT_TYPE:
++        return EventResult.skipped(EVENT_TYPE, "чужое событие")
++    if event.schema_version != SCHEMA_VERSION:
++        return EventResult.skipped(EVENT_TYPE, "другая версия схемы")
++
++    total = sum((line.amount for line in event.payload.lines), start=event.payload.zero)
++    return EventResult.forward(EVENT_TYPE, order_id=event.payload.order_id, total=total)
+diff --git a/app/workers/retry.py b/app/workers/retry.py
+index 4f6389e..0b40073 100644
+--- a/app/workers/retry.py
++++ b/app/workers/retry.py
+@@ -2,5 +2,13 @@ import time
+ from collections.abc import Callable
+ 
+ 
+-def with_retries(call: Callable[[], object], attempts: int) -> object:
+-    return call()
++def with_retries(call: Callable[[], object], attempts: int, delay: float = 0.5) -> object:
++    """Вызвать `call` до `attempts` раз, повторяя при `ConnectionError`."""
++    last: ConnectionError | None = None
++    for attempt in range(1, attempts):
++        try:
++            return call()
++        except ConnectionError as error:
++            last = error
++            time.sleep(delay * attempt)
++    raise RuntimeError("исчерпаны попытки") from last

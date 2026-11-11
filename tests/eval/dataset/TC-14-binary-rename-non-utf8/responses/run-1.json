@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1",
+  "findings": [
+    {
+      "filePath": "app/reports/export_csv.py",
+      "side": "new",
+      "line": 16,
+      "category": "correctness",
+      "severity": "medium",
+      "message": "`rows[1:]` пропускает первую запись: заголовок пишется отдельно через `HEADER`, а `rows` — только данные, поэтому в каждой выгрузке теряется первый платёж. Итерироваться по `rows` целиком.",
+      "confidence": 0.8,
+      "suggestion": {
+        "diff": "-    for row in rows[1:]:\n+    for row in rows:"
+      },
+      "rule": null
+    }
+  ],
+  "summary": {
+    "problem": "При переименовании выгрузки CSV цикл стал пропускать первую строку данных. Логотип — бинарный файл, `text_utils` перенесён без изменений, `scripts/reports.sh` сменил только режим.",
+    "positives": [
+      "Переименования сделаны через `git mv`, история файлов сохраняется"
+    ],
+    "effort": "низкие"
+  }
+}

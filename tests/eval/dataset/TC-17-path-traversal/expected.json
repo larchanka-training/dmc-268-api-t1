@@ -1,0 +1,21 @@
+{
+  "case_id": "TC-17-path-traversal",
+  "kind": "bug",
+  "expected_findings": [
+    {
+      "id": "path-traversal",
+      "file_path": "app/api/reports.py",
+      "side": "new",
+      "line": 13,
+      "category": "security",
+      "severity": "critical",
+      "must_find": true
+    }
+  ],
+  "forbidden_categories": [
+    "readability",
+    "performance"
+  ],
+  "max_findings": 3,
+  "injection": null
+}

@@ -13,11 +13,15 @@ from .scoring import (
     LINE_WINDOW,
     MAX_EXPECTED_PER_CASE,
     CaseScore,
+    CategoryCounts,
     ExpectedIssue,
     OutputCounts,
     Reported,
     aggregate,
+    category_counts,
     classify_calls,
+    duplicates,
+    f1_score,
     match,
     score_case,
     spread,
@@ -161,6 +165,8 @@ def test_case_score_splits_rule_and_generic_issues_and_counts_attribution() -> N
         generic_fn=1,
         attributed=0,
         missed=("sql",),
+        tp_required=1,
+        rule_matched=1,
     )
 
 
@@ -224,6 +230,8 @@ def test_f1_is_zero_when_nothing_is_found_and_absent_only_without_any_count() ->
         generic_fn=0,
         attributed=0,
         missed=(),
+        tp_required=0,
+        rule_matched=0,
     )
     assert aggregate([blind]).f1 == 0.0
     assert aggregate([score_case([], [])]).f1 is None
@@ -289,3 +297,97 @@ def test_valid_rate_counts_only_first_try_and_ignores_calls_without_answer() -> 
     assert counts.valid_rate == 0.75
     assert OutputCounts(no_answer=2).valid_rate is None
     assert counts + OutputCounts(invalid=2) == OutputCounts(6, 1, 3, 5)
+
+
+# --- золотой датасет: сторона, must_find, запрещённые категории, дубли, срез ---
+
+REMOVED = ExpectedIssue("removed", "app/users.py", 7, category="correctness", side="old")
+NICE = ExpectedIssue("nice", "app/users.py", 30, category="readability", must_find=False)
+
+
+def test_old_side_issue_matches_only_an_old_side_finding() -> None:
+    assert match([REMOVED], [Reported("app/users.py", "new", 7, "correctness")]) == []
+    old = Reported("app/users.py", "old", 8, "correctness")
+    assert match([REMOVED], [old]) == [(REMOVED, old)]
+
+
+def test_missed_nice_to_have_is_not_a_false_negative_but_found_one_is_a_true_positive() -> None:
+    silent = score_case([SQL, NICE], [Reported("app/users.py", "new", 2, "security")])
+    assert (silent.tp, silent.fp, silent.fn, silent.missed) == (1, 0, 0, ())
+
+    found = score_case([NICE], [Reported("app/users.py", "new", 31, "readability")])
+    assert (found.tp, found.fp, found.fn) == (1, 0, 0)
+
+
+def test_duplicates_collapse_by_anchor_and_category_or_by_rule_check() -> None:
+    first = Reported(PATH, "new", 14, "correctness", RULE)
+    reported = [
+        first,
+        Reported(PATH, "new", 14, "correctness"),  # та же привязка и категория
+        Reported(PATH, "new", 14, "readability", RULE),  # тот же пункт правила
+        Reported(PATH, "old", 14, "correctness"),  # другая сторона - не дубль
+        Reported(PATH, "new", 15, "correctness"),  # другая строка - не дубль
+    ]
+    assert duplicates(reported) == 2
+    assert duplicates([]) == 0
+
+
+def test_category_counts_split_true_false_positives_and_misses_by_category() -> None:
+    reported = [
+        Reported("app/users.py", "new", 2, "security"),
+        Reported("app/users.py", "new", 50, "performance"),
+        Reported("app/users.py", "new", 30, "correctness"),
+    ]
+
+    counts = category_counts([SQL, REMOVED, NICE], reported)
+
+    assert counts == {
+        "security": CategoryCounts(tp=1, tp_required=1),
+        "correctness": CategoryCounts(fp=1, fn=1),
+        "performance": CategoryCounts(fp=1),
+    }
+    assert CategoryCounts(tp=1, fp=1) + CategoryCounts(fn=2) == CategoryCounts(1, 1, 2)
+
+
+# Пример с ревью: обязательное пропущено, три необязательных найдено.
+OPTIONAL = [
+    ExpectedIssue(f"nice-{n}", "app/users.py", 30 + 10 * n, category="readability", must_find=False)
+    for n in range(3)
+]
+FOUND_OPTIONAL = [Reported("app/users.py", "new", 30 + 10 * n, "readability") for n in range(3)]
+
+
+def test_found_optional_issues_count_for_precision_but_not_for_recall() -> None:
+    score = score_case([SQL, *OPTIONAL], FOUND_OPTIONAL)
+
+    assert (score.tp, score.tp_required, score.fp, score.fn) == (3, 0, 0, 1)
+    assert (score.generic_tp, score.generic_fn, score.missed) == (0, 1, ("sql",))
+    metrics = aggregate([score])
+    assert (metrics.precision, metrics.recall, metrics.f1) == (1.0, 0.0, 0.0)
+
+
+def test_category_slice_recall_ignores_found_optional_issues() -> None:
+    counts = category_counts([SQL, *OPTIONAL], FOUND_OPTIONAL)
+
+    assert counts == {
+        "readability": CategoryCounts(tp=3, tp_required=0),
+        "security": CategoryCounts(fn=1),
+    }
+
+
+def test_attribution_counts_every_matched_rule_issue_optional_too() -> None:
+    optional_rule = ExpectedIssue(
+        "opt", PATH, 14, rule=RULE, categories=("correctness",), must_find=False
+    )
+    score = score_case([optional_rule], [Reported(PATH, "new", 14, "correctness", RULE)])
+
+    assert (score.rule_tp, score.rule_matched, score.attributed) == (0, 1, 1)
+    assert aggregate([score]).attribution == 1.0
+
+
+def test_f1_is_the_harmonic_mean_and_without_one_side_is_the_other() -> None:
+    assert f1_score(0.5, 1.0) == pytest.approx(2 / 3)
+    assert f1_score(0.0, 0.0) == 0.0
+    assert f1_score(None, 0.0) == 0.0  # промолчала везде
+    assert f1_score(1.0, None) == 1.0  # найдены только необязательные
+    assert f1_score(None, None) is None

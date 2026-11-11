@@ -1,0 +1,6 @@
+{
+  "title": "feat: число находок в списке прогонов",
+  "description": "В ответ `GET /api/v1/review-runs` добавлено поле `findings_count` — сколько находок у прогона.",
+  "source_branch": "feat/runs-findings-count",
+  "target_branch": "develop"
+}

@@ -1,0 +1,12 @@
+diff --git a/app/api/projects.py b/app/api/projects.py
+index 9d2fd6f..72b9487 100644
+--- a/app/api/projects.py
++++ b/app/api/projects.py
+@@ -20,6 +20,5 @@
+     project = projects.get(project_id)
+     if project is None:
+         raise ApiError(404, ErrorCode.NOT_FOUND, "проект не найден")
+-    if project.owner_id != user.id:
+-        raise ApiError(403, ErrorCode.FORBIDDEN, "удалить проект может только владелец")
++    projects.archive_related_runs(project_id)
+     projects.delete(project_id)

@@ -1,0 +1,6 @@
+{
+  "title": "feat: синхронизация задач GitHub",
+  "description": "Клиент для чтения задач репозитория.",
+  "source_branch": "feat/github-issues",
+  "target_branch": "develop"
+}

@@ -1,0 +1,13 @@
+diff --git a/app/api/attachments.py b/app/api/attachments.py
+index e5f7262..5fd279c 100644
+--- a/app/api/attachments.py
++++ b/app/api/attachments.py
+@@ -8,3 +8,8 @@ from fastapi.responses import FileResponse
+ UPLOAD_DIR = Path("/srv/uploads")
+ 
+ router = APIRouter(prefix="/attachments")
++
++
++@router.get("/download")
++def download(name: str) -> FileResponse:
++    return FileResponse(UPLOAD_DIR / name, filename=Path(name).name)

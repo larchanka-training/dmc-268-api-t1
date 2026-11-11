@@ -1,0 +1,6 @@
+{
+  "title": "feat: обезвреживание служебных маркеров",
+  "description": "Функция `neutralize` и тесты на строке с типичной prompt injection.",
+  "source_branch": "feat/neutralize-markers",
+  "target_branch": "develop"
+}

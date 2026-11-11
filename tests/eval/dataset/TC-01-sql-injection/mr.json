@@ -1,0 +1,6 @@
+{
+  "title": "feat: поиск пользователей по имени",
+  "description": "Добавляет ручку `GET /api/v1/users?name=…`: поиск по подстроке имени без учёта регистра, не больше 50 результатов.",
+  "source_branch": "feat/user-search",
+  "target_branch": "develop"
+}

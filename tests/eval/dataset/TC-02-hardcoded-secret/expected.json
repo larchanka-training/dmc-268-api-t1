@@ -1,0 +1,29 @@
+{
+  "case_id": "TC-02-hardcoded-secret",
+  "kind": "bug",
+  "expected_findings": [
+    {
+      "id": "hardcoded-token",
+      "file_path": "app/infrastructure/github_client.py",
+      "side": "new",
+      "line": 6,
+      "category": "security",
+      "severity": "critical",
+      "must_find": true
+    },
+    {
+      "id": "tls-verify-off",
+      "file_path": "app/infrastructure/github_client.py",
+      "side": "new",
+      "line": 18,
+      "category": "security",
+      "severity": "high",
+      "must_find": false
+    }
+  ],
+  "forbidden_categories": [
+    "readability"
+  ],
+  "max_findings": 4,
+  "injection": null
+}

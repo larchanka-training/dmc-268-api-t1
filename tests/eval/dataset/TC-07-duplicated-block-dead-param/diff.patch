@@ -1,0 +1,15 @@
+diff --git a/app/application/notifications.py b/app/application/notifications.py
+index 16d8bde..3df4eab 100644
+--- a/app/application/notifications.py
++++ b/app/application/notifications.py
+@@ -8,3 +8,10 @@
+     subject = f"Ревью {run.repository}#{run.pr_number} завершено"
+     body = f"Найдено замечаний: {run.findings_count}. Подробности: {run.url}"
+     mailer.send(to=run.owner_email, subject=subject, body=body)
++
++
++def notify_watchers(mailer: Mailer, run: ReviewRun, watchers: list[str], locale: str = "ru") -> None:
++    for email in watchers:
++        subject = f"Ревью {run.repository}#{run.pr_number} завершено"
++        body = f"Найдено замечаний: {run.findings_count}. Подробности: {run.url}"
++        mailer.send(to=email, subject=subject, body=body)

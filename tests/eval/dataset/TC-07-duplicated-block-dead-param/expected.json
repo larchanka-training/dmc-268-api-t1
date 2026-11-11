@@ -1,0 +1,30 @@
+{
+  "case_id": "TC-07-duplicated-block-dead-param",
+  "kind": "bug",
+  "expected_findings": [
+    {
+      "id": "duplicated-message",
+      "file_path": "app/application/notifications.py",
+      "side": "new",
+      "line": 14,
+      "category": "readability",
+      "severity": "low",
+      "must_find": true
+    },
+    {
+      "id": "dead-locale-param",
+      "file_path": "app/application/notifications.py",
+      "side": "new",
+      "line": 13,
+      "category": "readability",
+      "severity": "low",
+      "must_find": true
+    }
+  ],
+  "forbidden_categories": [
+    "security",
+    "performance"
+  ],
+  "max_findings": 4,
+  "injection": null
+}

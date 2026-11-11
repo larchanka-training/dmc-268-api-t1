@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "1",
+  "findings": [
+    {
+      "filePath": "app/infrastructure/github_client.py",
+      "side": "new",
+      "line": 6,
+      "category": "security",
+      "severity": "critical",
+      "message": "Токен доступа GitHub захардкожен в исходнике и попадёт в историю git. Токен нужно отозвать, а значение брать из настроек (переменная окружения или секрет), не из кода.",
+      "confidence": 0.97,
+      "suggestion": null,
+      "rule": null
+    },
+    {
+      "filePath": "app/infrastructure/github_client.py",
+      "side": "new",
+      "line": 18,
+      "category": "security",
+      "severity": "high",
+      "message": "`verify=False` отключает проверку TLS-сертификата: запрос с токеном в заголовке можно перехватить подменой сертификата. Уберите параметр — по умолчанию проверка включена.",
+      "confidence": 0.85,
+      "suggestion": null,
+      "rule": null
+    }
+  ],
+  "summary": {
+    "problem": "В код зашит токен GitHub, а клиент отключает проверку TLS — токен утекает и через репозиторий, и через сеть.",
+    "positives": [
+      "Есть тайм-аут и `raise_for_status`",
+      "Клиент закрывается явно"
+    ],
+    "effort": "низкие"
+  }
+}

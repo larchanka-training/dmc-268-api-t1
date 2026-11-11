@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "1",
+  "findings": [
+    {
+      "filePath": "app/domain/publishing.py",
+      "side": "new",
+      "line": 8,
+      "category": "readability",
+      "severity": "low",
+      "message": "Сравнение с `True` и `if … return True else return False` избыточны: функция сводится к `return finding.severity in (FindingSeverity.HIGH, FindingSeverity.CRITICAL)`.",
+      "confidence": 0.9,
+      "suggestion": null,
+      "rule": null
+    },
+    {
+      "filePath": "app/domain/publishing.py",
+      "side": "new",
+      "line": 16,
+      "category": "readability",
+      "severity": "low",
+      "message": "Ручной цикл по индексу и `list(result)` в конце вместо генератора списка: `return [f for f in findings if _is_blocking(f)]`. Копия `list(result)` ничего не добавляет.",
+      "confidence": 0.85,
+      "suggestion": null,
+      "rule": null
+    },
+    {
+      "filePath": "app/domain/publishing.py",
+      "side": "new",
+      "line": 22,
+      "category": "readability",
+      "severity": "low",
+      "message": "Лишние преобразования: `sorted` уже возвращает список, `set` принимает генератор, а `str()` у уже строкового `file_path` не нужен. Достаточно `sorted({f.file_path for f in findings})`.",
+      "confidence": 0.7,
+      "suggestion": null,
+      "rule": null
+    }
+  ],
+  "summary": {
+    "problem": "Новый код фильтрации обрастает синтаксическим шумом: сравнение с `True`, ручной цикл по индексам, цепочки лишних преобразований.",
+    "positives": [
+      "Фильтрация вынесена в чистую функцию домена"
+    ],
+    "effort": "низкие"
+  }
+}

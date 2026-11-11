@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1",
+  "findings": [
+    {
+      "filePath": "app/webhooks/verify.py",
+      "side": "new",
+      "line": 14,
+      "category": "security",
+      "severity": "medium",
+      "message": "Подпись сравнивается через `==`, время сравнения зависит от длины совпавшего префикса — это даёт атаку по времени на подбор подписи. Сравнивать через `hmac.compare_digest(header, expected)`.",
+      "confidence": 0.85,
+      "suggestion": {
+        "diff": "-    return header == expected\n+    return hmac.compare_digest(header, expected)"
+      },
+      "rule": null
+    }
+  ],
+  "summary": {
+    "problem": "Подпись вебхука сравнивается не за постоянное время. Lock-файлы и сгенерированный клиент отфильтрованы сервисом и не ревьюились; миграция добавляет nullable-колонку с откатом — замечаний к ней нет.",
+    "positives": [
+      "HMAC считается по сырому телу запроса, а не по разобранному JSON"
+    ],
+    "effort": "низкие"
+  }
+}

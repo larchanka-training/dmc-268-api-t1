@@ -1,0 +1,6 @@
+{
+  "title": "feat: клиент GitHub для выгрузки диффа",
+  "description": "Добавляет `GithubClient`: забирает дифф пул-реквеста в формате `application/vnd.github.v3.diff`. Нужен воркеру для этапа сбора диффа.",
+  "source_branch": "feat/github-diff-client",
+  "target_branch": "develop"
+}

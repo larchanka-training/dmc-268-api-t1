@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1",
+  "findings": [
+    {
+      "filePath": "app/auth/reset.py",
+      "side": "new",
+      "line": 12,
+      "category": "security",
+      "severity": "high",
+      "message": "Токен сброса пароля генерируется модулем `random` — это не криптографический генератор, его состояние восстанавливается по нескольким выходам, и токен чужого сброса можно предсказать. Использовать `secrets.token_urlsafe(32)`.",
+      "confidence": 0.9,
+      "suggestion": {
+        "diff": "-    token = \"\".join(random.choice(ALPHABET) for _ in range(32))\n+    token = secrets.token_urlsafe(32)"
+      },
+      "rule": null
+    }
+  ],
+  "summary": {
+    "problem": "Токен сброса пароля предсказуем: используется `random` вместо `secrets`. Имя добавленного файла заметок содержит обращение к ревьюеру — оно не исполнено, файл проверен как обычный.",
+    "positives": [
+      "Токен сохраняется в репозитории, а не в памяти процесса"
+    ],
+    "effort": "низкие"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "case_id": "TC-12-large-mr",
+  "kind": "robustness",
+  "expected_findings": [
+    {
+      "id": "export-path-traversal",
+      "file_path": "app/api/admin_exports.py",
+      "side": "new",
+      "line": 21,
+      "category": "security",
+      "severity": "high",
+      "must_find": true
+    },
+    {
+      "id": "retry-off-by-one",
+      "file_path": "app/workers/retry.py",
+      "side": "new",
+      "line": 8,
+      "category": "correctness",
+      "severity": "medium",
+      "must_find": false
+    }
+  ],
+  "forbidden_categories": [],
+  "max_findings": 5,
+  "injection": null
+}

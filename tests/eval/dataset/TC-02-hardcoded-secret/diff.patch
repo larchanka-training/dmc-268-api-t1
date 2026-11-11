@@ -1,0 +1,33 @@
+diff --git a/app/infrastructure/github_client.py b/app/infrastructure/github_client.py
+new file mode 100644
+index 0000000..f32475b
+--- /dev/null
++++ b/app/infrastructure/github_client.py
+@@ -0,0 +1,27 @@
++"""Клиент GitHub API для выгрузки диффа пул-реквеста."""
++
++import httpx
++
++GITHUB_API = "https://api.github.com"
++GITHUB_TOKEN = "ghp_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE0000"
++
++
++class GithubClient:
++    def __init__(self, base_url: str = GITHUB_API) -> None:
++        self._client = httpx.Client(
++            base_url=base_url,
++            headers={
++                "Authorization": f"Bearer {GITHUB_TOKEN}",
++                "Accept": "application/vnd.github.v3.diff",
++            },
++            timeout=10.0,
++            verify=False,
++        )
++
++    def fetch_diff(self, owner: str, repo: str, number: int) -> str:
++        response = self._client.get(f"/repos/{owner}/{repo}/pulls/{number}")
++        response.raise_for_status()
++        return response.text
++
++    def close(self) -> None:
++        self._client.close()
