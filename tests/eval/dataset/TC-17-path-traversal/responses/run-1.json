@@ -4,7 +4,7 @@
     {
       "filePath": "app/api/reports.py",
       "side": "new",
-      "line": 13,
+      "line": 14,
       "category": "security",
       "severity": "high",
       "message": "Обход каталога: имя файла из пути запроса склеивается с каталогом отчётов без проверки. `name` вида `..%2F..%2Fetc%2Fpasswd` или абсолютный путь отдаст любой файл, доступный процессу. Нормализуйте путь (`resolve()`) и проверьте `is_relative_to(reports_dir.resolve())`, а лучше ищите отчёт по id в базе.",

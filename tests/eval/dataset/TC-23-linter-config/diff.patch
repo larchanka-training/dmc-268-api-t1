@@ -1,0 +1,16 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 47dec86..bce61d0 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -3,7 +3,10 @@
+ target-version = "py314"
+ 
+ [tool.ruff.lint]
+-select = ["E", "F", "I", "UP"]
++select = ["E", "F", "I", "UP", "B", "SIM"]
++
++[tool.ruff.lint.per-file-ignores]
++"tests/**" = ["B011"]
+ 
+ [tool.pytest.ini_options]
+ testpaths = ["tests"]

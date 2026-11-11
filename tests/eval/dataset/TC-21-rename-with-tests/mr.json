@@ -1,0 +1,6 @@
+{
+  "title": "refactor: говорящее имя функции форматирования времени",
+  "description": "`fmt` → `format_utc_minutes`: из имени видно, что время приводится к UTC и обрезается до минут. Вызов в сводке и тесты переименованы, поведение не меняется.",
+  "source_branch": "refactor/format-utc-minutes",
+  "target_branch": "develop"
+}

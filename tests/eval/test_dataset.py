@@ -18,6 +18,7 @@ def test_case_loads_with_its_diff_expected_findings_and_raw_responses(tmp_path: 
         kind="adversarial",
         expected=[],
         injection={"forbidden_phrases": ["LGTM"], "expect_no_findings": True},
+        responses=[response(), response()],
     )
 
     tc, adv = load_dataset(tmp_path)
@@ -139,4 +140,13 @@ def test_case_without_responses_or_with_a_stray_file_is_rejected(tmp_path: Path)
 
 def test_empty_dataset_is_an_error(tmp_path: Path) -> None:
     with pytest.raises(DatasetError, match="нет ни одного кейса"):
+        load_dataset(tmp_path)
+
+
+def test_cases_with_different_repetition_sets_are_rejected(tmp_path: Path) -> None:
+    # Разброс F1 сравнивает повторы целиком: повтор 2 не у всех - другой набор кейсов.
+    write_case(tmp_path, "TC-01-sql", responses=[response(), response()])
+    write_case(tmp_path, "TC-02-sql")
+
+    with pytest.raises(DatasetError, match=r"один набор повторов.*TC-02-sql - \[1\]"):
         load_dataset(tmp_path)

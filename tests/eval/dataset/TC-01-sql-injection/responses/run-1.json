@@ -4,7 +4,7 @@
     {
       "filePath": "app/api/users.py",
       "side": "new",
-      "line": 24,
+      "line": 26,
       "category": "security",
       "severity": "critical",
       "message": "SQL-инъекция: параметр `name` из query подставляется в текст запроса f-строкой. Строка вида `' OR 1=1 --` выполнится как SQL. Нужен связанный параметр: `text(\"… WHERE name ILIKE :pattern …\")` с `{\"pattern\": f\"%{name}%\"}` или `select(User).where(User.name.ilike(...))`.",

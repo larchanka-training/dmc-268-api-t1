@@ -18,10 +18,14 @@
 ближайшая к одному нарушению, могла быть единственной парой для соседнего.
 
 Для золотого датасета (`tests/eval/dataset/`) разметка шире: сторона диффа
-(`side`, по умолчанию `new` - как у корпуса правил), `must_find` (пропуск
-необязательного нарушения - не FN, найденное - TP) и запрещённые категории
-кейса (замечание такой категории - FP при любой позиции, в пары не идёт).
-По умолчанию поведение то же, что у корпуса правил.
+(`side`, по умолчанию `new` - как у корпуса правил), `must_find` и запрещённые
+категории кейса (замечание такой категории - FP при любой позиции, в пары не
+идёт). Найденное необязательное нарушение - TP для Precision: замечание верное,
+шумом его не назвать. В Recall оно не входит ни числителем, ни знаменателем:
+иначе найденные необязательные прятали бы пропуск обязательных. Поэтому TP
+считается дважды - все пары (`tp`, для Precision) и пары с обязательными
+нарушениями (`tp_required`, для Recall). По умолчанию все нарушения обязательные,
+и поведение то же, что у корпуса правил.
 """
 
 from collections.abc import Collection, Iterable, Sequence
@@ -90,9 +94,11 @@ class Reported:
 
 @dataclass(frozen=True, slots=True)
 class CaseScore:
+    # Все пары, включая необязательные нарушения: числитель Precision.
     tp: int
     fp: int
     fn: int
+    # Найденные обязательные (`must_find`) нарушения правил и общие - для Recall по видам.
     rule_tp: int
     rule_fn: int
     generic_tp: int
@@ -101,12 +107,17 @@ class CaseScore:
     attributed: int
     # Идентификаторы размеченных нарушений, которые модель пропустила.
     missed: tuple[str, ...]
+    # Пары с обязательными нарушениями: числитель Recall.
+    tp_required: int
+    # Все совпавшие нарушения правил, и необязательные тоже: знаменатель доли верных ссылок.
+    rule_matched: int
 
 
 @dataclass(frozen=True, slots=True)
 class Metrics:
     cases: int
     tp: int
+    tp_required: int
     fp: int
     fn: int
     precision: float | None
@@ -195,37 +206,45 @@ def score_case(
 ) -> CaseScore:
     pairs = _allowed_pairs(expected, reported, forbidden_categories)
     found = {e.id for e, _ in pairs}
-    # Необязательное нарушение в FN и в пропуски не идёт: в знаменателе Recall - только must_find.
+    # Recall - только по must_find: необязательное нарушение не входит ни в TP Recall, ни в FN.
     required = [e for e in expected if e.must_find]
-    rule_issues = [e for e in expected if e.rule is not None]
-    generic_issues = [e for e in expected if e.rule is None]
-    rule_tp = sum(1 for e in rule_issues if e.id in found)
-    generic_tp = sum(1 for e in generic_issues if e.id in found)
-    rule_missed = sum(1 for e in rule_issues if e.must_find and e.id not in found)
-    generic_missed = sum(1 for e in generic_issues if e.must_find and e.id not in found)
+    rule_issues = [e for e in required if e.rule is not None]
+    generic_issues = [e for e in required if e.rule is None]
     return CaseScore(
         tp=len(pairs),
         fp=len(reported) - len(pairs),
         fn=sum(1 for e in required if e.id not in found),
-        rule_tp=rule_tp,
-        rule_fn=rule_missed,
-        generic_tp=generic_tp,
-        generic_fn=generic_missed,
+        rule_tp=sum(1 for e in rule_issues if e.id in found),
+        rule_fn=sum(1 for e in rule_issues if e.id not in found),
+        generic_tp=sum(1 for e in generic_issues if e.id in found),
+        generic_fn=sum(1 for e in generic_issues if e.id not in found),
         attributed=sum(1 for e, r in pairs if e.rule is not None and r.rule == e.rule),
         missed=tuple(e.id for e in required if e.id not in found),
+        tp_required=sum(1 for e in required if e.id in found),
+        rule_matched=sum(1 for e, _ in pairs if e.rule is not None),
     )
 
 
 @dataclass(frozen=True, slots=True)
 class CategoryCounts:
-    """TP/FP/FN одной категории `FindingCategory` - для среза метрик по категориям."""
+    """TP/FP/FN одной категории `FindingCategory` - для среза метрик по категориям.
+
+    `tp` - все пары (Precision среза), `tp_required` - пары с обязательными
+    нарушениями (Recall среза), как в `CaseScore`.
+    """
 
     tp: int = 0
     fp: int = 0
     fn: int = 0
+    tp_required: int = 0
 
     def __add__(self, other: CategoryCounts) -> CategoryCounts:
-        return CategoryCounts(self.tp + other.tp, self.fp + other.fp, self.fn + other.fn)
+        return CategoryCounts(
+            self.tp + other.tp,
+            self.fp + other.fp,
+            self.fn + other.fn,
+            self.tp_required + other.tp_required,
+        )
 
 
 def category_counts(
@@ -250,7 +269,7 @@ def category_counts(
         counts[category] = counts.get(category, CategoryCounts()) + delta
 
     for e, r in pairs:
-        add(e.category or r.category, CategoryCounts(tp=1))
+        add(e.category or r.category, CategoryCounts(tp=1, tp_required=int(e.must_find)))
     for e in expected:
         if e.must_find and e.id not in found and e.category is not None:
             add(e.category, CategoryCounts(fn=1))
@@ -300,30 +319,43 @@ def _ratio(numerator: int, denominator: int) -> float | None:
     return numerator / denominator if denominator else None
 
 
+def f1_score(precision: float | None, recall: float | None) -> float | None:
+    """Гармоническое среднее P и R; у Precision и Recall разные TP, поэтому не через счётчики.
+
+    Если одна сторона не определена, F1 - другая сторона, а не пропуск: модель,
+    которая промолчала везде (P без знаменателя, R = 0), получает F1 = 0, иначе
+    такой повтор выпал бы из среднего; замечания без обязательных нарушений в
+    наборе (R без знаменателя) судятся по Precision. Нет данных ни у одной -
+    значения нет.
+    """
+    if precision is None or recall is None:
+        return recall if precision is None else precision
+    return 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+
+
 def aggregate(scores: Iterable[CaseScore]) -> Metrics:
     """Микроусреднение по кейсам: счётчики складываются, отношения - от сумм."""
     items = list(scores)
     tp = sum(s.tp for s in items)
+    tp_required = sum(s.tp_required for s in items)
     fp = sum(s.fp for s in items)
     fn = sum(s.fn for s in items)
     precision = _ratio(tp, tp + fp)
-    recall = _ratio(tp, tp + fn)
-    # Через счётчики, а не через P и R: при TP = 0 F1 - ноль, а не пропуск,
-    # иначе повтор, где модель ничего не нашла, выпал бы из среднего.
-    f1 = _ratio(2 * tp, 2 * tp + fp + fn)
+    recall = _ratio(tp_required, tp_required + fn)
     rule_tp = sum(s.rule_tp for s in items)
     generic_tp = sum(s.generic_tp for s in items)
     return Metrics(
         cases=len(items),
         tp=tp,
+        tp_required=tp_required,
         fp=fp,
         fn=fn,
         precision=precision,
         recall=recall,
-        f1=f1,
+        f1=f1_score(precision, recall),
         rule_recall=_ratio(rule_tp, rule_tp + sum(s.rule_fn for s in items)),
         generic_recall=_ratio(generic_tp, generic_tp + sum(s.generic_fn for s in items)),
-        attribution=_ratio(sum(s.attributed for s in items), rule_tp),
+        attribution=_ratio(sum(s.attributed for s in items), sum(s.rule_matched for s in items)),
     )
 
 

@@ -21,6 +21,7 @@ from .scoring import (
     category_counts,
     classify_calls,
     duplicates,
+    f1_score,
     match,
     score_case,
     spread,
@@ -164,6 +165,8 @@ def test_case_score_splits_rule_and_generic_issues_and_counts_attribution() -> N
         generic_fn=1,
         attributed=0,
         missed=("sql",),
+        tp_required=1,
+        rule_matched=1,
     )
 
 
@@ -227,6 +230,8 @@ def test_f1_is_zero_when_nothing_is_found_and_absent_only_without_any_count() ->
         generic_fn=0,
         attributed=0,
         missed=(),
+        tp_required=0,
+        rule_matched=0,
     )
     assert aggregate([blind]).f1 == 0.0
     assert aggregate([score_case([], [])]).f1 is None
@@ -346,8 +351,52 @@ def test_category_counts_split_true_false_positives_and_misses_by_category() -> 
     counts = category_counts([SQL, REMOVED, NICE], reported, forbidden_categories=())
 
     assert counts == {
-        "security": CategoryCounts(tp=1),
+        "security": CategoryCounts(tp=1, tp_required=1),
         "correctness": CategoryCounts(fp=1, fn=1),
         "performance": CategoryCounts(fp=1),
     }
     assert CategoryCounts(tp=1, fp=1) + CategoryCounts(fn=2) == CategoryCounts(1, 1, 2)
+
+
+# Пример с ревью: обязательное пропущено, три необязательных найдено.
+OPTIONAL = [
+    ExpectedIssue(f"nice-{n}", "app/users.py", 30 + 10 * n, category="readability", must_find=False)
+    for n in range(3)
+]
+FOUND_OPTIONAL = [Reported("app/users.py", "new", 30 + 10 * n, "readability") for n in range(3)]
+
+
+def test_found_optional_issues_count_for_precision_but_not_for_recall() -> None:
+    score = score_case([SQL, *OPTIONAL], FOUND_OPTIONAL)
+
+    assert (score.tp, score.tp_required, score.fp, score.fn) == (3, 0, 0, 1)
+    assert (score.generic_tp, score.generic_fn, score.missed) == (0, 1, ("sql",))
+    metrics = aggregate([score])
+    assert (metrics.precision, metrics.recall, metrics.f1) == (1.0, 0.0, 0.0)
+
+
+def test_category_slice_recall_ignores_found_optional_issues() -> None:
+    counts = category_counts([SQL, *OPTIONAL], FOUND_OPTIONAL)
+
+    assert counts == {
+        "readability": CategoryCounts(tp=3, tp_required=0),
+        "security": CategoryCounts(fn=1),
+    }
+
+
+def test_attribution_counts_every_matched_rule_issue_optional_too() -> None:
+    optional_rule = ExpectedIssue(
+        "opt", PATH, 14, rule=RULE, categories=("correctness",), must_find=False
+    )
+    score = score_case([optional_rule], [Reported(PATH, "new", 14, "correctness", RULE)])
+
+    assert (score.rule_tp, score.rule_matched, score.attributed) == (0, 1, 1)
+    assert aggregate([score]).attribution == 1.0
+
+
+def test_f1_is_the_harmonic_mean_and_without_one_side_is_the_other() -> None:
+    assert f1_score(0.5, 1.0) == pytest.approx(2 / 3)
+    assert f1_score(0.0, 0.0) == 0.0
+    assert f1_score(None, 0.0) == 0.0  # промолчала везде
+    assert f1_score(1.0, None) == 1.0  # найдены только необязательные
+    assert f1_score(None, None) is None

@@ -151,7 +151,7 @@ def to_markdown(
         f"| Precision | {_num(m.precision)} |",
         f"| Recall (must_find) | {_num(m.recall)} |",
         f"| F1 | {_num(m.f1)} |",
-        f"| TP/FP/FN | {m.tp}/{m.fp}/{m.fn} |",
+        f"| TP/TP(must)/FP/FN | {m.tp}/{m.tp_required}/{m.fp}/{m.fn} |",
         (
             f"| Valid-output rate | {_num(summary.outputs.valid_rate)} "
             f"({summary.outputs.first_try}/{summary.outputs.first_try + summary.outputs.invalid}) |"
@@ -190,12 +190,13 @@ def to_markdown(
             "«недостаточно данных» (LLM_EVAL §3)."
         ),
         "",
-        "| Категория | Precision | Recall | TP/FP/FN | Кейсов | Размечено | Данных |",
+        "| Категория | Precision | Recall | TP/TP(must)/FP/FN | Кейсов | Обязательных | Данных |",
         "|---|---|---|---|---|---|---|",
     ]
     lines += [
         f"| `{s.category}` | {_num(s.precision)} | {_num(s.recall)} | "
-        f"{s.counts.tp}/{s.counts.fp}/{s.counts.fn} | {s.cases} | {s.expected} | "
+        f"{s.counts.tp}/{s.counts.tp_required}/{s.counts.fp}/{s.counts.fn} | {s.cases} | "
+        f"{s.expected} | "
         f"{'достаточно' if s.sufficient else 'недостаточно'} |"
         for s in summary.categories
     ]
@@ -213,7 +214,7 @@ def to_markdown(
         "",
         "## По кейсам",
         "",
-        "| Кейс | Вид | Повтор | Валиден | Замечаний | TP/FP/FN | Пропущено | Сверх max |",
+        "| Кейс | Вид | Повтор | Валиден | Замечаний | TP/TP(must)/FP/FN | Пропущено | Сверх max |",
         "|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
@@ -225,7 +226,7 @@ def to_markdown(
         missed = ", ".join(f"`{m.split('/', 1)[1]}`" for m in r.score.missed) or "—"
         lines.append(
             f"| `{r.case_id}` | {r.kind} | {r.repetition} | да | {len(r.reported)} | "
-            f"{r.score.tp}/{r.score.fp}/{r.score.fn} | {missed} | "
+            f"{r.score.tp}/{r.score.tp_required}/{r.score.fp}/{r.score.fn} | {missed} | "
             f"{'да' if r.over_limit else '—'} |"
         )
     return "\n".join(lines) + "\n"

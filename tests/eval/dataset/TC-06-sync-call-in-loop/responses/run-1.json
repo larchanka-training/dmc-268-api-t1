@@ -11,6 +11,17 @@
       "confidence": 0.85,
       "suggestion": null,
       "rule": null
+    },
+    {
+      "filePath": "app/infrastructure/publisher.py",
+      "side": "new",
+      "line": 27,
+      "category": "correctness",
+      "severity": "medium",
+      "message": "У `requests.post` нет `timeout`: зависший GitHub API повесит публикацию навсегда. Передайте `timeout=` явно.",
+      "confidence": 0.7,
+      "suggestion": null,
+      "rule": null
     }
   ],
   "summary": {

@@ -318,4 +318,21 @@ def load_dataset(root: Path = DATASET_DIR) -> tuple[GoldCase, ...]:
     ]
     if not cases:
         raise DatasetError(f"в {root} нет ни одного кейса TC-* или adversarial/ADV-*")
+    _check_repetitions(cases)
     return tuple(cases)
+
+
+def _check_repetitions(cases: list[GoldCase]) -> None:
+    """У всех кейсов один набор повторов: иначе F1 повторов считан по разным кейсам.
+
+    Разброс F1 сравнивает повторы целиком; если `run-2.json` есть не у всех,
+    повтор 2 мерит другой набор кейсов, и гейт краснеет без регресса.
+    """
+    sets = {case.case_id: tuple(r.repetition for r in case.responses) for case in cases}
+    reference = cases[0].case_id
+    differ = [case_id for case_id, reps in sets.items() if reps != sets[reference]]
+    if differ:
+        raise DatasetError(
+            f"у всех кейсов нужен один набор повторов: у {reference} - {list(sets[reference])}, "
+            + ", ".join(f"у {c} - {list(sets[c])}" for c in differ)
+        )

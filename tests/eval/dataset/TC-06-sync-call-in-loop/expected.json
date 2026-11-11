@@ -15,7 +15,7 @@
       "id": "no-timeout",
       "file_path": "app/infrastructure/publisher.py",
       "side": "new",
-      "line": 24,
+      "line": 16,
       "category": "correctness",
       "severity": "medium",
       "must_find": false

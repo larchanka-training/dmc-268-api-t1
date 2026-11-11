@@ -1,0 +1,49 @@
+diff --git a/app/presentation/time_format.py b/app/presentation/time_format.py
+index 7c53187..44f03f3 100644
+--- a/app/presentation/time_format.py
++++ b/app/presentation/time_format.py
+@@ -3,6 +3,6 @@
+ from datetime import UTC, datetime
+ 
+ 
+-def fmt(dt: datetime) -> str:
++def format_utc_minutes(dt: datetime) -> str:
+     """Время в UTC в виде `2026-10-11 10:00 UTC`."""
+     return dt.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+diff --git a/app/presentation/summary.py b/app/presentation/summary.py
+index b8f2394..23d54b1 100644
+--- a/app/presentation/summary.py
++++ b/app/presentation/summary.py
+@@ -1,8 +1,8 @@
+ """Текст сводки ревью для комментария в пул-реквесте."""
+ 
+ from app.domain.entities import ReviewRun
+-from app.presentation.time_format import fmt
++from app.presentation.time_format import format_utc_minutes
+ 
+ 
+ def summary_header(run: ReviewRun) -> str:
+-    return f"Ревью от {fmt(run.created_at)}"
++    return f"Ревью от {format_utc_minutes(run.created_at)}"
+diff --git a/tests/presentation/test_time_format.py b/tests/presentation/test_time_format.py
+index 5e97568..77bcc73 100644
+--- a/tests/presentation/test_time_format.py
++++ b/tests/presentation/test_time_format.py
+@@ -1,12 +1,12 @@
+ from datetime import UTC, datetime, timedelta, timezone
+ 
+-from app.presentation.time_format import fmt
++from app.presentation.time_format import format_utc_minutes
+ 
+ 
+-def test_fmt_converts_to_utc() -> None:
++def test_format_utc_minutes_converts_to_utc() -> None:
+     moscow = timezone(timedelta(hours=3))
+-    assert fmt(datetime(2026, 10, 11, 13, 0, tzinfo=moscow)) == "2026-10-11 10:00 UTC"
++    assert format_utc_minutes(datetime(2026, 10, 11, 13, 0, tzinfo=moscow)) == "2026-10-11 10:00 UTC"
+ 
+ 
+-def test_fmt_keeps_utc() -> None:
+-    assert fmt(datetime(2026, 10, 11, 10, 5, tzinfo=UTC)) == "2026-10-11 10:05 UTC"
++def test_format_utc_minutes_keeps_utc() -> None:
++    assert format_utc_minutes(datetime(2026, 10, 11, 10, 5, tzinfo=UTC)) == "2026-10-11 10:05 UTC"
