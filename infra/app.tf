@@ -152,11 +152,34 @@ resource "terraform_data" "api_healthcheck" {
   input = local.api_healthcheck
 }
 
+# Экземпляры воркера (#99). Все потребляют одну очередь: прогон захватывает
+# один воркер (спека job-queue), а prefetch 1 не даёт одному забрать две
+# задачи, пока другой простаивает. Первый сохраняет имя dmc268-worker — то же,
+# что до масштабирования, — следующие получают номер: dmc268-worker-2,
+# dmc268-worker-3. Ключ for_each — имя контейнера: план называет экземпляр,
+# который создаётся или удаляется, а уменьшение worker_replicas снимает
+# последние номера, не трогая первые. Имена по этому правилу ищут и проверка
+# деплоя (.github/scripts/deploy/check-worker.sh), и алерты (local.worker_rules).
+locals {
+  worker_names = [for i in range(var.worker_replicas) : i == 0 ? "dmc268-worker" : "dmc268-worker-${i + 1}"]
+}
+
+# До #99 воркер был один и жил в состоянии по адресу без ключа: moved
+# переносит его в первый экземпляр, и контейнер от этого не пересоздаётся. На
+# стенде перенос делает раньше infra.sh (`tofu state mv`): с непроведённым
+# переносом targeted-план базы и брокера не строится.
+moved {
+  from = docker_container.worker
+  to   = docker_container.worker["dmc268-worker"]
+}
+
 # Воркер: тот же образ, что у API, другая команда. Портов нет: с остальным
 # стеком он говорит только через очередь и базу (`backend-delivery`), наружу —
 # исходящими запросами к GitHub API за диффом, правилами и файлами.
 resource "docker_container" "worker" {
-  name    = "dmc268-worker"
+  for_each = toset(local.worker_names)
+
+  name    = each.key
   image   = local.api_image_ref
   restart = "unless-stopped"
   command = ["python", "-m", "app.worker"]
@@ -165,7 +188,10 @@ resource "docker_container" "worker" {
   # вызова модели (ревью и верификатор) × LLM_TIMEOUT_SECONDS (300) ×
   # LLM_MAX_ATTEMPTS (2) × провайдеры (два с фоллбэком), плюс минута на GitHub
   # и базу. stop_timeout — для docker stop, destroy_grace_seconds — для
-  # пересоздания: без него провайдер удаляет контейнер сразу SIGKILL.
+  # пересоздания: без него провайдер удаляет контейнер сразу SIGKILL. Окно у
+  # всех экземпляров одно, а пересоздаёт их apply параллельно (parallelism 10
+  # по умолчанию больше потолка worker_replicas): ожидание выката — одно окно,
+  # а не по окну на экземпляр (timeout-minutes job deploy в deploy.yml).
   stop_timeout          = local.worker_stop_seconds
   destroy_grace_seconds = local.worker_stop_seconds
 
@@ -208,9 +234,10 @@ resource "docker_container" "worker" {
   # llm_hosted_fallback или основным при llm_backend = eurorouter: в обоих
   # случаях код проверяемых репозиториев уходит hosted-провайдеру
   # (docs/BACKEND_ARCHITECTURE.md, модель угроз).
-  # Телеметрия — local.telemetry_env, как у api выше.
+  # Телеметрия — local.telemetry_env, как у api выше; service.instance.id —
+  # имя экземпляра: ряды метрик экземпляров не сливаются в один.
   env = concat(local.app_env, local.telemetry_env, [
-    "OTEL_RESOURCE_ATTRIBUTES=${local.telemetry_resource},service.instance.id=dmc268-worker",
+    "OTEL_RESOURCE_ATTRIBUTES=${local.telemetry_resource},service.instance.id=${each.key}",
     "GITHUB_APP_ID=${var.github_app_id}",
     "GITHUB_APP_PRIVATE_KEY=${var.github_app_private_key}",
     # Ссылка из check run на прогон в кабинете (#295): check run ставит в основном воркер.

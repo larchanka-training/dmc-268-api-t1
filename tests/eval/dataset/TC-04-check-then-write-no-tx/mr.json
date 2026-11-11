@@ -1,0 +1,6 @@
+{
+  "title": "feat: списание стоимости прогона с баланса",
+  "description": "Добавляет `BalanceService.charge`: перед прогоном ревью проверяет, хватает ли средств, и списывает стоимость с записью в журнал операций.",
+  "source_branch": "feat/charge-review-run",
+  "target_branch": "develop"
+}

@@ -1,0 +1,6 @@
+{
+  "title": "feat: подпись вебхуков и обновление FastAPI",
+  "description": "Проверка HMAC-подписи входящих вебхуков, колонка `webhooks.secret_hash` миграцией, перегенерированный клиент billing-api, обновлены `fastapi` и `left-pad-fake` (lock-файлы).",
+  "source_branch": "feat/webhook-signature",
+  "target_branch": "develop"
+}

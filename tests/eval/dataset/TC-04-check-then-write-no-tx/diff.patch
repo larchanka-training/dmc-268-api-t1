@@ -1,0 +1,29 @@
+diff --git a/app/application/balance.py b/app/application/balance.py
+index a7831e7..3de19de 100644
+--- a/app/application/balance.py
++++ b/app/application/balance.py
+@@ -28,12 +28,24 @@
+     def balance(self, account_id: uuid.UUID) -> Decimal:
+         with self._session_factory() as session:
+             account = session.get(Account, account_id)
+             return account.balance if account else Decimal(0)
+ 
+     def top_up(self, account_id: uuid.UUID, amount: Decimal) -> None:
+         with self._session_factory.begin() as session:
+             account = session.scalars(
+                 select(Account).where(Account.id == account_id).with_for_update()
+             ).one()
+             account.balance += amount
+             session.add(LedgerEntry(account_id=account_id, amount=amount, reason="top_up"))
++
++    def charge(self, charge: Charge) -> None:
++        """Списать стоимость прогона, если на балансе хватает средств."""
++        current = self.balance(charge.account_id)
++        if current < charge.amount:
++            raise InsufficientFunds(str(charge.account_id))
++        with self._session_factory.begin() as session:
++            account = session.get(Account, charge.account_id)
++            account.balance = current - charge.amount
++            session.add(
++                LedgerEntry(account_id=charge.account_id, amount=-charge.amount, reason=charge.reason)
++            )

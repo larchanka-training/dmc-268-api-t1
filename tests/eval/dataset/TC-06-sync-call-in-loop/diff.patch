@@ -1,0 +1,35 @@
+diff --git a/app/infrastructure/publisher.py b/app/infrastructure/publisher.py
+new file mode 100644
+index 0000000..f0ce3ea
+--- /dev/null
++++ b/app/infrastructure/publisher.py
+@@ -0,0 +1,29 @@
++"""Публикация комментариев к строкам пул-реквеста."""
++
++import requests
++
++from app.domain.entities import Finding
++
++API = "https://api.github.com"
++
++
++async def publish_comments(
++    token: str, owner: str, repo: str, number: int, commit_sha: str, findings: list[Finding]
++) -> int:
++    """Опубликовать находки комментариями к строкам; вернуть число опубликованных."""
++    published = 0
++    for finding in findings:
++        response = requests.post(
++            f"{API}/repos/{owner}/{repo}/pulls/{number}/comments",
++            headers={"Authorization": f"Bearer {token}"},
++            json={
++                "body": finding.message,
++                "commit_id": commit_sha,
++                "path": finding.file_path,
++                "line": finding.line,
++                "side": "RIGHT",
++            },
++        )
++        if response.status_code == 201:
++            published += 1
++    return published

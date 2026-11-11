@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "1",
+  "findings": [
+    {
+      "filePath": "app/api/users.py",
+      "side": "new",
+      "line": 26,
+      "category": "security",
+      "severity": "critical",
+      "message": "SQL-инъекция: параметр `name` из query подставляется в текст запроса f-строкой. Строка вида `' OR 1=1 --` выполнится как SQL. Нужен связанный параметр: `text(\"… WHERE name ILIKE :pattern …\")` с `{\"pattern\": f\"%{name}%\"}` или `select(User).where(User.name.ilike(...))`.",
+      "confidence": 0.95,
+      "suggestion": null,
+      "rule": null
+    }
+  ],
+  "summary": {
+    "problem": "Новая ручка поиска собирает SQL f-строкой из пользовательского ввода — это SQL-инъекция.",
+    "positives": [
+      "Ограничены длина параметра и размер выдачи"
+    ],
+    "effort": "низкие"
+  }
+}

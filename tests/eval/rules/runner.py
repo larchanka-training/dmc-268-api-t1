@@ -20,21 +20,11 @@ from app.application.ports.llm_gateway import LlmGateway
 from app.domain.entities import Finding
 from app.domain.enums import DiffSide, ReviewRunStatus
 from app.domain.repo_rules import RULES_PATH
-from app.infrastructure.prompts import DEFAULT_PROMPTS_DIR
 
 from ...e2e.stack import Stack, deliver
 from ..report import RunResult
 from ..scoring import OutputCounts, Reported, classify_calls, score_case
 from .corpus import CONFIGS, Case
-
-
-def prompts_sha256() -> str:
-    """Хэш текстов промптов: метрики сравнимы только при одном промпте (LLM_EVAL §5)."""
-    digest = hashlib.sha256()
-    for path in sorted(DEFAULT_PROMPTS_DIR.glob("*.md")):
-        digest.update(path.name.encode())
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
 
 
 def _sha(*parts: object) -> str:

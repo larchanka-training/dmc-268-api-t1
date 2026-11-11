@@ -700,6 +700,11 @@ Access-запись uvicorn о запросе health-check'а SHALL NOT попа
 - **WHEN** пауза breaker'а GitHub вышла 15 минут назад, пробного вызова нет, а воркер не подтверждает задачи
 - **THEN** `WorkerStalled` и `ReviewJobStuck` горят: прогоны не откладываются, воркер завис
 
+#### Scenario: Откладывает один воркер из двух
+
+- **WHEN** у одного экземпляра воркера breaker GitHub разомкнут, а другой замкнут и 20 минут не подтверждает задачу
+- **THEN** `WorkerStalled` и `ReviewJobStuck` горят: разомкнутый breaker одного экземпляра не глушит остальные
+
 #### Scenario: Воркер завис при живом фоллбэке
 
 - **WHEN** breaker Ollama разомкнут, Eurorouter замкнут, а воркер 20 минут не подтверждает задачу
@@ -983,3 +988,22 @@ SHALL NOT попадать в запись. Спан httpx ответа с `x-re
 
 - **WHEN** breaker ждёт пробы, а очередь пуста
 - **THEN** `ProviderCircuitOpen` молчит
+
+### Requirement: Алерты видят каждый экземпляр воркера
+
+`ContainerDown` SHALL гореть по каждому экземпляру воркера, который должен работать, но не запущен; список экземпляров Prometheus SHALL получать от развёртывания. Экземпляр сверх списка SHALL NOT зажигать `ContainerDown`. `ContainerMemoryNearLimit` экземпляра SHALL нести `service` без номера экземпляра.
+
+#### Scenario: Пропал второй экземпляр
+
+- **WHEN** экземпляров два, и `dmc268-worker-2` не запущен дольше 2 минут
+- **THEN** горит `ContainerDown` с `container_name="dmc268-worker-2"`
+
+#### Scenario: Пропал первый экземпляр
+
+- **WHEN** не запущен `dmc268-worker`
+- **THEN** горит один `ContainerDown` с `container_name="dmc268-worker"`, а не два
+
+#### Scenario: Память экземпляра у потолка
+
+- **WHEN** `dmc268-worker-2` 10 минут занимает больше 90 % лимита памяти
+- **THEN** горит `ContainerMemoryNearLimit` с `container_name="dmc268-worker-2"` и `service="worker"`

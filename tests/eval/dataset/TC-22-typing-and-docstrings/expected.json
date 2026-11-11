@@ -1,0 +1,10 @@
+{
+  "case_id": "TC-22-typing-and-docstrings",
+  "kind": "negative",
+  "expected_findings": [],
+  "forbidden_categories": [
+    "readability"
+  ],
+  "max_findings": 0,
+  "injection": null
+}

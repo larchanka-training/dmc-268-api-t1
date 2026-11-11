@@ -580,30 +580,34 @@ def test_stack_networks_split_the_stack_from_the_app_in_infra() -> None:
         assert "docker_network.observability[0].name" in block, name
 
 
-# --- пароль роли мониторинга не теряется при переносе миграций ------------------------
+# --- пароли ролей не теряются при переносе миграций ---------------------------------
 
 
-def test_the_monitor_role_password_step_travels_with_the_migrations() -> None:
-    """Шаг перегенерации пароля роли (ALTER ROLE при выключенном
-    track_utility) и сам пароль едут вместе с миграциями в ОБОИХ окружениях:
-    если при переносе миграций шаг потерять, ревизия 0013 создаст роль с
-    дефолтным паролем и коллектор не войдёт (замечание ревью PR #130)."""
+def test_the_role_password_step_travels_with_the_migrations() -> None:
+    """Шаг перегенерации паролей ролей (ALTER ROLE при выключенном
+    track_utility) и сами пароли едут вместе с миграциями в ОБОИХ окружениях:
+    если при переносе миграций шаг потерять, ревизии 0013 и 0023 оставят роли с
+    паролем первого создания, и смена секрета не дойдёт до коллектора, API и
+    воркера (замечание ревью PR #130)."""
     compose_migrate = load_compose()["services"]["migrate"]
     assert "POSTGRES_MONITOR_PASSWORD" in compose_migrate["environment"]
+    assert "POSTGRES_APP_PASSWORD" in compose_migrate["environment"]
     command = " ".join(compose_migrate["command"])
     assert "alembic upgrade head" in command
-    assert "python alembic/monitor_password.py" in command
-    assert "python alembic/monitor_password.py" in MIGRATE_SCRIPT.read_text(encoding="utf-8")
+    assert "python alembic/role_passwords.py" in command
+    assert "python alembic/role_passwords.py" in MIGRATE_SCRIPT.read_text(encoding="utf-8")
 
     # Шаг — один файл на оба окружения; он же едет в образ вместе с alembic/.
-    step = (REPO / "alembic" / "monitor_password.py").read_text(encoding="utf-8")
-    assert 'os.environ["POSTGRES_MONITOR_PASSWORD"]' in step
+    step = (REPO / "alembic" / "role_passwords.py").read_text(encoding="utf-8")
+    assert '"dmc268_monitor": "POSTGRES_MONITOR_PASSWORD"' in step
+    assert '"dmc268_app": "POSTGRES_APP_PASSWORD"' in step
     assert "ALTER ROLE" in step
     assert "track_utility" in step
 
-    # Пароль приезжает в скрипт окружением миграций — выходом migrate_env.
+    # Пароли приезжают в скрипт окружением миграций — выходом migrate_env.
     outputs = OUTPUTS_TF.read_text(encoding="utf-8")
     assert "POSTGRES_MONITOR_PASSWORD=${var.postgres_monitor_password}" in outputs
+    assert "POSTGRES_APP_PASSWORD=${var.postgres_app_password}" in outputs
 
 
 # --- приём и телеметрия вендора -------------------------------------------------------
@@ -772,11 +776,13 @@ def test_compose_caps_batch_queues_by_default(service: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("container", "instance"),
-    [("api", "dmc268-api"), ("worker", "dmc268-worker")],
+    ("container", "instance", "name"),
+    # У воркера экземпляров несколько (#99): имя и идентификатор — ключ for_each,
+    # dmc268-worker, dmc268-worker-2 и далее (сверяет infra/tests/main.tftest.hcl).
+    [("api", "dmc268-api", '"dmc268-api"'), ("worker", "${each.key}", "each.key")],
 )
 def test_infra_resource_attributes_pin_a_stable_instance_id(
-    container: str, instance: str
+    container: str, instance: str, name: str
 ) -> None:
     """service.instance.id — стабильное имя контейнера, не UUID (смысл —
     в тесте compose выше). У миграций своего контейнера больше нет:
@@ -784,14 +790,14 @@ def test_infra_resource_attributes_pin_a_stable_instance_id(
     (выход migrate_env)."""
     block = _tf_container_block(container)
     match = re.search(
-        r"OTEL_RESOURCE_ATTRIBUTES=[^\n]+service\.instance\.id=(?P<instance>[\w-]+)",
+        r"OTEL_RESOURCE_ATTRIBUTES=[^\n]+service\.instance\.id=(?P<instance>[^\",\s]+)",
         block,
     )
     assert match is not None, f"в env {container} нет service.instance.id"
     assert match.group("instance") == instance
     # Источник истины для идентификатора — имя контейнера.
-    name = re.search(r'name\s*=\s*"(?P<name>[^"]+)"', block)
-    assert name is not None and name.group("name") == instance
+    found = re.search(r"^  name\s*=\s*(?P<name>\S+)$", block, re.MULTILINE)
+    assert found is not None and found.group("name") == name
 
 
 # --- дашборд Grafana (задача 8) ------------------------------------------------------

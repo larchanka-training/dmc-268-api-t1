@@ -53,9 +53,16 @@ def test_alert_names_are_unique() -> None:
 
 
 def test_container_down_watches_real_container_names() -> None:
-    """Имена в ContainerDown — контейнеры стенда: опечатка дала бы вечный алерт."""
+    """Имена в ContainerDown — контейнеры стенда: опечатка дала бы вечный алерт.
+
+    Первый экземпляр воркера назван не в своём блоке, а правилом local.worker_names (#99),
+    поэтому его имя берётся оттуда."""
     watched = set(re.findall(r'container_name="([^"]+)"', _alerts()["ContainerDown"]["expr"]))
-    infra_names = set(re.findall(r'^\s*name\s*=\s*"(dmc268-[\w-]+)"', read_infra_text(), re.MULTILINE))
+    text = read_infra_text()
+    infra_names = set(re.findall(r'^\s*name\s*=\s*"(dmc268-[\w-]+)"', text, re.MULTILINE))
+    worker_names = re.search(r"^\s*worker_names\s*=.*\? \"(dmc268-[\w-]+)\" :", text, re.MULTILINE)
+    assert worker_names is not None
+    infra_names.add(worker_names.group(1))
     # dmc268-ui поднимает стек репозитория dmc-268-ui-t1 на том же сервере.
     assert watched - {"dmc268-ui"} <= infra_names, watched - infra_names
     assert {"dmc268-api", "dmc268-worker", "dmc268-postgres", "dmc268-rabbitmq"} <= watched
@@ -95,9 +102,13 @@ def test_circuit_breaker_rules_read_the_worker_gauge() -> None:
     assert _alerts()["LlmProviderCircuitOpen"]["labels"] == {"severity": "warning", "service": "llm-provider"}
     # Зависание глушится тем же условием, что откладывает прогоны (`deferral`): разомкнут (2),
     # а не любой breaker и не застрявшее «ждёт пробы».
-    deferring = 'min(max_over_time(review_circuit_breaker_state{provider!="GitHub"}[15m])) == 2'
+    deferring = 'min by (instance) (max_over_time(review_circuit_breaker_state{provider!="GitHub"}[15m])) == 2'
     assert deferring in _alerts()["WorkerStalled"]["expr"]
     assert deferring in _alerts()["ReviewJobStuck"]["expr"]
+    # Глушит, только когда откладывают все экземпляры воркера (#99), а не любой из них.
+    every_instance = "== count(count by (instance) (review_circuit_breaker_state))"
+    assert every_instance in _alerts()["WorkerStalled"]["expr"]
+    assert every_instance in _alerts()["ReviewJobStuck"]["expr"]
 
 
 def test_backup_mark_matches_the_rule() -> None:
@@ -185,14 +196,30 @@ def test_failed_telegram_delivery_goes_to_the_fail_url_and_not_to_telegram() -> 
 
 
 def test_prometheus_loads_the_rules_and_sends_to_alertmanager() -> None:
+    """Правила алертов и экземпляры воркера (#99, workers.yml) — по одному пути в compose,
+    на стенде и в `promtool check config` CI."""
     config = yaml.safe_load(PROMETHEUS.read_text(encoding="utf-8"))
-    assert config["rule_files"] == ["/etc/prometheus/alerts.yml"]
+    assert config["rule_files"] == ["/etc/prometheus/alerts.yml", "/etc/prometheus/workers.yml"]
     targets = config["alerting"]["alertmanagers"][0]["static_configs"][0]["targets"]
     assert targets == ["alertmanager:9093"]
 
     volumes = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))["services"]["prometheus"]["volumes"]
-    assert "./infra/observability/alerts.yml:/etc/prometheus/alerts.yml:ro" in volumes
-    assert 'file    = "/etc/prometheus/alerts.yml"' in read_infra_text()
+    ci = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    for name in ("alerts.yml", "workers.yml"):
+        assert f"./infra/observability/{name}:/etc/prometheus/{name}:ro" in volumes
+        assert f'file    = "/etc/prometheus/{name}"' in read_infra_text()
+        assert f'-v "$PWD/infra/observability/{name}:/etc/prometheus/{name}:ro"' in ci
+
+
+def test_local_workers_file_expects_the_first_worker() -> None:
+    """Локальный workers.yml — один экземпляр dmc268-worker; его же стенд собирает из
+    worker_replicas = 1 (сверяет infra/tests/observability.tftest.hcl)."""
+    config = yaml.safe_load((OBSERVABILITY_DIR / "workers.yml").read_text(encoding="utf-8"))
+    rules = [rule for group in config["groups"] for rule in group["rules"]]
+    assert rules == [
+        {"record": "dmc268:worker_expected", "expr": "vector(1)", "labels": {"container_name": "dmc268-worker"}}
+    ]
+    assert "dmc268:worker_expected" in _alerts()["ContainerDown"]["expr"]
 
 
 def test_thresholds_are_documented() -> None:

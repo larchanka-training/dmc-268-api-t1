@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "1",
+  "findings": [
+    {
+      "filePath": "app/application/rules_cache.py",
+      "side": "new",
+      "line": 8,
+      "category": "performance",
+      "severity": "high",
+      "message": "Кэш растёт без границы: ключ — пара репозиторий и коммит, а каждый пуш даёт новый SHA. В долгоживущем воркере словарь копит правила всех коммитов всех репозиториев и не освобождается. Ограничьте размер (`functools.lru_cache(maxsize=…)` или `cachetools.LRUCache`/`TTLCache`) или кэшируйте по хэшу содержимого файла.",
+      "confidence": 0.8,
+      "suggestion": null,
+      "rule": null
+    },
+    {
+      "filePath": "app/application/rules_cache.py",
+      "side": "new",
+      "line": 23,
+      "category": "performance",
+      "severity": "medium",
+      "message": "Подписчиков можно только добавить: отписки нет, и каждый вызов `on_rules_loaded` (например, на каждый прогон) навсегда удерживает замыкание вместе со всем, что оно захватило. Верните функцию отписки или храните слабые ссылки.",
+      "confidence": 0.55,
+      "suggestion": null,
+      "rule": null
+    }
+  ],
+  "summary": {
+    "problem": "Модульный кэш правил и список подписчиков растут без ограничения — утечка памяти в долгоживущем воркере.",
+    "positives": [
+      "Правила парсятся один раз на коммит"
+    ],
+    "effort": "низкие"
+  }
+}

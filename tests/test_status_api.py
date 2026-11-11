@@ -53,11 +53,12 @@ def test_a_guest_without_a_session_gets_the_status() -> None:
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/json"
     assert re.fullmatch(r"[0-9a-f]{32}", response.headers["x-trace-id"])
+    # Один экземпляр воркера не запущен — degraded (#99): задачи забирают остальные.
     assert response.json() == {
-        "status": "outage",
+        "status": "degraded",
         "components": [
             {"id": "api", "status": "operational"},
-            {"id": "worker", "status": "outage"},
+            {"id": "worker", "status": "degraded"},
             {"id": "queue", "status": "degraded"},
         ],
         "checked_at": "2026-11-02T12:00:05Z",

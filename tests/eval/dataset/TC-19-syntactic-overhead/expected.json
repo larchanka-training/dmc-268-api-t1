@@ -1,0 +1,39 @@
+{
+  "case_id": "TC-19-syntactic-overhead",
+  "kind": "bug",
+  "expected_findings": [
+    {
+      "id": "bool-compare-and-if-return",
+      "file_path": "app/domain/publishing.py",
+      "side": "new",
+      "line": 8,
+      "category": "readability",
+      "severity": "low",
+      "must_find": true
+    },
+    {
+      "id": "manual-index-loop",
+      "file_path": "app/domain/publishing.py",
+      "side": "new",
+      "line": 16,
+      "category": "readability",
+      "severity": "low",
+      "must_find": true
+    },
+    {
+      "id": "redundant-conversions",
+      "file_path": "app/domain/publishing.py",
+      "side": "new",
+      "line": 23,
+      "category": "readability",
+      "severity": "low",
+      "must_find": true
+    }
+  ],
+  "forbidden_categories": [
+    "security",
+    "performance"
+  ],
+  "max_findings": 5,
+  "injection": null
+}

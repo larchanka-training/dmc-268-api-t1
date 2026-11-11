@@ -1,0 +1,29 @@
+{
+  "case_id": "TC-06-sync-call-in-loop",
+  "kind": "bug",
+  "expected_findings": [
+    {
+      "id": "sync-http-in-loop",
+      "file_path": "app/infrastructure/publisher.py",
+      "side": "new",
+      "line": 16,
+      "category": "performance",
+      "severity": "high",
+      "must_find": true
+    },
+    {
+      "id": "no-timeout",
+      "file_path": "app/infrastructure/publisher.py",
+      "side": "new",
+      "line": 16,
+      "category": "correctness",
+      "severity": "medium",
+      "must_find": false
+    }
+  ],
+  "forbidden_categories": [
+    "security"
+  ],
+  "max_findings": 4,
+  "injection": null
+}

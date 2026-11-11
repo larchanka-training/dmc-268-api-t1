@@ -1,0 +1,6 @@
+{
+  "title": "chore: правила ruff bugbear и simplify",
+  "description": "Включил наборы `B` и `SIM` в ruff. В тестах разрешён `assert False` (B011) — он там намеренный. Нарушений в коде нет, `ruff check .` зелёный.",
+  "source_branch": "chore/ruff-bugbear",
+  "target_branch": "develop"
+}

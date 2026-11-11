@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "1",
+  "findings": [
+    {
+      "filePath": "app/application/notifications.py",
+      "side": "new",
+      "line": 15,
+      "category": "readability",
+      "severity": "low",
+      "message": "Тема и тело письма скопированы из `notify_owner` построчно. Вынесите сборку в общую функцию (например, `_completion_message(run) -> tuple[str, str]`), иначе правка текста в одном месте разойдётся с другим. Заодно тема и тело не зависят от адресата — их достаточно собрать один раз до цикла.",
+      "confidence": 0.8,
+      "suggestion": null,
+      "rule": null
+    },
+    {
+      "filePath": "app/application/notifications.py",
+      "side": "new",
+      "line": 13,
+      "category": "readability",
+      "severity": "low",
+      "message": "Параметр `locale` нигде не используется: вызывающий может передать `\"en\"` и получить русское письмо. Задел без реализации лучше не добавлять — уберите параметр, пока локализации нет.",
+      "confidence": 0.75,
+      "suggestion": null,
+      "rule": null
+    }
+  ],
+  "summary": {
+    "problem": "Текст письма продублирован между двумя функциями, а новый параметр `locale` мёртвый.",
+    "positives": [
+      "Поведение для владельца не изменилось"
+    ],
+    "effort": "низкие"
+  }
+}

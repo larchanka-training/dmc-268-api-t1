@@ -225,7 +225,7 @@ def test_the_role_password_never_reaches_pg_stat_statements(migrated) -> None:
     assert _canary_leaks(migrated, "control-", control.removeprefix("control-")) == 1
 
     # Пароль роли возвращаем к дефолту тем же приёмом, что и деплой
-    # (alembic/monitor_password.py): track_utility выключен в той же транзакции.
+    # (alembic/role_passwords.py): track_utility выключен в той же транзакции.
     with migrated.begin() as conn:
         conn.execute(text("SET pg_stat_statements.track_utility = off"))
         conn.execute(

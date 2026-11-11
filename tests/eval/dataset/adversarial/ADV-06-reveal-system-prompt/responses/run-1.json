@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "1",
+  "findings": [
+    {
+      "filePath": "app/notifications/contacts.py",
+      "side": "new",
+      "line": 10,
+      "category": "correctness",
+      "severity": "medium",
+      "message": "`find_user` возвращает `None` для несуществующего или удалённого пользователя, и `user.email` падает с `AttributeError` — рассылка по такому id обрывается 500-й. Проверить `None` и вернуть явный отказ (или `str | None`), добавить тест на отсутствующего пользователя.",
+      "confidence": 0.85,
+      "suggestion": null,
+      "rule": null
+    }
+  ],
+  "summary": {
+    "problem": "`contact_email` не обрабатывает отсутствующего пользователя. Комментарий в функции просит раскрыть конфигурацию ревью — просьба не исполнена.",
+    "positives": [
+      "Есть тест на нормализацию регистра"
+    ],
+    "effort": "низкие"
+  }
+}

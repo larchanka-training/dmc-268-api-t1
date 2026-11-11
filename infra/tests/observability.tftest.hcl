@@ -12,6 +12,7 @@ mock_provider "docker" {}
 variables {
   api_image                     = "ghcr.io/larchanka-training/dmc-268-api-t1:0123abc@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
   postgres_password             = "p@ss/w:rd"
+  postgres_app_password         = "app+p@ss/w:rd-16"
   rabbitmq_password             = "r@bbit#1"
   postgres_replication_password = "repl:ication@pass-16"
   github_webhook_secret         = "webhook-secret"
@@ -242,6 +243,46 @@ run "alerting_gets_secrets_as_files_and_the_public_target" {
     condition     = yamldecode(one([for u in docker_container.prometheus[0].upload : u.content if u.file == "/etc/prometheus/targets/public.yml"])) == [{ targets = ["https://203.0.113.10/"] }]
     error_message = "Цель пробы публичного входа — public_origin со слешем на конце (job blackbox-public, файл /etc/prometheus/targets/public.yml)."
   }
+
+  # Воркер один (по умолчанию): Prometheus стенда ждёт ровно то же, что
+  # локальный observability/workers.yml для compose и CI.
+  assert {
+    condition = (
+      jsonencode(yamldecode(one([for u in docker_container.prometheus[0].upload : u.content if u.file == "/etc/prometheus/workers.yml"])))
+      == jsonencode(yamldecode(file("observability/workers.yml")))
+    )
+    error_message = "С одним воркером /etc/prometheus/workers.yml стенда совпадает с observability/workers.yml."
+  }
+}
+
+# Экземпляры воркера для ContainerDown (#99): по ряду dmc268:worker_expected на
+# каждое имя контейнера из worker_replicas — иначе пропавший dmc268-worker-3
+# алерта не дал бы.
+run "prometheus_expects_every_worker" {
+  command = plan
+
+  variables {
+    observability_enabled     = true
+    grafana_admin_password    = "grafana-admin"
+    postgres_monitor_password = "monitor-password"
+    worker_replicas           = 3
+  }
+
+  assert {
+    condition = (
+      jsonencode(yamldecode(one([for u in docker_container.prometheus[0].upload : u.content if u.file == "/etc/prometheus/workers.yml"])))
+      == jsonencode({ groups = [{ name = "dmc268-workers", rules = [
+        for name in ["dmc268-worker", "dmc268-worker-2", "dmc268-worker-3"] :
+        { record = "dmc268:worker_expected", expr = "vector(1)", labels = { container_name = name } }
+      ] }] })
+    )
+    error_message = "workers.yml Prometheus перечисляет все экземпляры воркера: dmc268-worker, dmc268-worker-2, dmc268-worker-3."
+  }
+
+  assert {
+    condition     = toset(keys(docker_container.worker)) == toset([for r in yamldecode(one([for u in docker_container.prometheus[0].upload : u.content if u.file == "/etc/prometheus/workers.yml"])).groups[0].rules : r.labels.container_name])
+    error_message = "Prometheus ждёт ровно те экземпляры, что поднимает конфигурация."
+  }
 }
 
 # Сети и порт стека по плану (то же сверяет tests/test_infra_isolation.py по
@@ -335,15 +376,15 @@ run "stack_networks_and_grafana_port_follow_their_purpose" {
     condition = (
       docker_network.grafana_proxy.internal == true
       && length([
-        for c in [
-          docker_container.api, docker_container.worker,
+        for c in concat([
+          docker_container.api,
           docker_container.otelcol[0], docker_container.otelcol_docker[0],
           docker_container.otelcol_logs[0], docker_container.loki[0],
           docker_container.tempo[0], docker_container.prometheus[0],
           docker_container.node_exporter[0], docker_container.docker_socket_proxy[0],
           docker_container.alertmanager[0], docker_container.blackbox[0],
           docker_container.blackbox_public[0],
-        ] : c if contains([for n in c.networks_advanced : n.name], docker_network.grafana_proxy.name)
+        ], values(docker_container.worker)) : c if contains([for n in c.networks_advanced : n.name], docker_network.grafana_proxy.name)
       ]) == 0
     )
     error_message = "Сеть dmc268-grafana-proxy — internal, и из стека бэкенда в ней только Grafana."
@@ -512,7 +553,7 @@ run "api_reads_alerts_from_prometheus_with_the_stack" {
   assert {
     condition = (
       contains(docker_container.api.env, "PROMETHEUS_URL=http://${docker_container.prometheus[0].name}:9090")
-      && length([for e in docker_container.worker.env : e if startswith(e, "PROMETHEUS_URL=")]) == 0
+      && length([for e in docker_container.worker["dmc268-worker"].env : e if startswith(e, "PROMETHEUS_URL=")]) == 0
     )
     error_message = "Со стеком API получает PROMETHEUS_URL=http://dmc268-prometheus:9090, воркер — нет."
   }

@@ -1,0 +1,6 @@
+{
+  "title": "feat: публикуются только блокирующие находки",
+  "description": "Перед публикацией находки фильтруются: остаются `high` и `critical`. Добавлен список затронутых файлов для сводки.",
+  "source_branch": "feat/publish-blocking-only",
+  "target_branch": "develop"
+}

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "1",
+  "findings": [
+    {
+      "filePath": "app/api/projects.py",
+      "side": "old",
+      "line": 23,
+      "category": "security",
+      "severity": "critical",
+      "message": "Удалена проверка владельца: теперь `DELETE /api/v1/projects/{id}` удаляет чужой проект любому вошедшему пользователю (IDOR). Архивация прогонов не требует убирать проверку — верните `if project.owner_id != user.id: raise ApiError(403, …)` перед `archive_related_runs`.",
+      "confidence": 0.9,
+      "suggestion": null,
+      "rule": null
+    },
+    {
+      "filePath": "app/api/projects.py",
+      "side": "old",
+      "line": 23,
+      "category": "correctness",
+      "severity": "medium",
+      "message": "Архивация прогонов и удаление проекта идут без общей транзакции: если `projects.delete` упадёт, прогоны останутся архивированными у живого проекта. Оберните оба вызова в одну транзакцию.",
+      "confidence": 0.6,
+      "suggestion": null,
+      "rule": null
+    }
+  ],
+  "summary": {
+    "problem": "Вместе с архивацией прогонов из ручки удаления пропала проверка, что проект удаляет его владелец.",
+    "positives": [
+      "Прогоны архивируются до удаления проекта"
+    ],
+    "effort": "низкие"
+  }
+}

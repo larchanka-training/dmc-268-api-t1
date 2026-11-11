@@ -6,9 +6,11 @@
 приходит аргументом.
 
 Каждый компонент получает тяжелейший из статусов, которые дают сработавшие по нему алерты
-(`ALERT_RULES`); ни одного — `operational`. Кроме алертов о самом компоненте, в таблице —
-алерты базы (без неё недоступны api и worker) и алерты слепоты: Prometheus не снимает
-источник, на котором держатся алерты компонента, или метрик контейнеров нет вовсе. Тогда
+(`ALERT_RULES`); ни одного — `operational`. Воркер — несколько экземпляров (#99): упавший один
+— `degraded`, задачи забирают остальные; `outage` — у очереди нет ни одного потребителя.
+Кроме алертов о самом компоненте, в таблице — алерты базы (без неё недоступны api и worker) и
+алерты слепоты: Prometheus не снимает источник, на котором держатся алерты компонента, или
+метрик контейнеров нет вовсе. Тогда
 молчание алертов ничего не значит, и компонент — `unknown`, а не `operational`.
 
 Порядок тяжести один на компонент и на сервис целиком: `outage` > `degraded` > `unknown` >
@@ -18,6 +20,7 @@
 не задан, недоступен, ответил не по формату) — все компоненты `unknown`.
 """
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -51,19 +54,34 @@ class FiringAlert:
 
 @dataclass(frozen=True, slots=True)
 class AlertRule:
-    """Строка таблицы: алерт с такими метками даёт этим компонентам этот статус."""
+    """Строка таблицы: алерт с такими метками даёт этим компонентам этот статус.
+
+    `labels` сверяются равенством, `patterns` — шаблоном по всему значению: так одна строка
+    покрывает все экземпляры воркера.
+    """
 
     alert: str
     status: ServiceStatus
     components: tuple[ServiceComponent, ...]
     labels: Mapping[str, str] = field(default_factory=dict)
+    patterns: Mapping[str, re.Pattern[str]] = field(default_factory=dict)
 
     def matches(self, alert: FiringAlert) -> bool:
-        return alert.name == self.alert and all(alert.labels.get(k) == v for k, v in self.labels.items())
+        return (
+            alert.name == self.alert
+            and all(alert.labels.get(k) == v for k, v in self.labels.items())
+            and all(p.fullmatch(alert.labels.get(k, "")) for k, p in self.patterns.items())
+        )
 
 
 def _container(name: str) -> Mapping[str, str]:
     return {"container_name": name}
+
+
+# Имена экземпляров воркера: первый — dmc268-worker, следующие — dmc268-worker-<N>
+# (`local.worker_names` в infra/app.tf).
+WORKER_CONTAINER = re.compile(r"dmc268-worker(?:-[0-9]+)?")
+_WORKER_CONTAINERS: Mapping[str, re.Pattern[str]] = MappingProxyType({"container_name": WORKER_CONTAINER})
 
 
 # Имена алертов и меток — из `infra/observability/alerts.yml`, имена job — из
@@ -74,16 +92,22 @@ ALERT_RULES: tuple[AlertRule, ...] = (
     AlertRule("ServiceProbeFailed", ServiceStatus.OUTAGE, (_API,), {"service": "api"}),
     AlertRule("Api5xxSpike", ServiceStatus.DEGRADED, (_API,)),
     AlertRule("ContainerRestarting", ServiceStatus.DEGRADED, (_API,), _container("dmc268-api")),
-    # Воркер: не запущен или не забирает задачи — ревью не идут; падающие прогоны и
+    # Воркер: у очереди нет ни одного потребителя — ревью не идут; падающие прогоны и
     # перезапуски — идут с ошибками. ReviewDlqNotEmpty здесь нет: у DLQ нет TTL, и одно
     # ядовитое сообщение держало бы degraded, пока DLQ не разберут руками, а падающие
     # прогоны и так ловит ReviewRunsFailing.
-    AlertRule("ContainerDown", ServiceStatus.OUTAGE, (_WORKER,), _container("dmc268-worker")),
+    #
+    # Экземпляров воркера может быть несколько (#99), и не запущенный один — degraded:
+    # задачи забирают остальные. Остановлены все — горит WorkerNotConsuming, и он раньше
+    # ContainerDown: ряд остановленного контейнера держится ещё 5 минут
+    # (metric_expiration в otelcol-docker.yaml), поэтому и с одним экземпляром outage
+    # приходит не позже, чем раньше давал ContainerDown.
+    AlertRule("ContainerDown", ServiceStatus.DEGRADED, (_WORKER,), patterns=_WORKER_CONTAINERS),
     AlertRule("WorkerNotConsuming", ServiceStatus.OUTAGE, (_WORKER,)),
     # Подписан, но задачи лежат без подтверждений. По метрикам это не отличить от медленной модели
     # с фоллбэком, и очередь всё равно разойдётся, моделью или выметателем: degraded, а не outage.
     AlertRule("WorkerStalled", ServiceStatus.DEGRADED, (_WORKER,)),
-    AlertRule("ContainerRestarting", ServiceStatus.DEGRADED, (_WORKER,), _container("dmc268-worker")),
+    AlertRule("ContainerRestarting", ServiceStatus.DEGRADED, (_WORKER,), patterns=_WORKER_CONTAINERS),
     AlertRule("ReviewRunsFailing", ServiceStatus.DEGRADED, (_WORKER,)),
     # Висит одна задача: ждёт один прогон или, с очередью за ним, все (тогда горит и WorkerStalled).
     AlertRule("ReviewJobStuck", ServiceStatus.DEGRADED, (_WORKER,)),

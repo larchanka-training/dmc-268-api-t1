@@ -1,0 +1,20 @@
+{
+  "case_id": "TC-16-resource-leak-file-handle",
+  "kind": "bug",
+  "expected_findings": [
+    {
+      "id": "handle-leak-on-error",
+      "file_path": "app/application/export.py",
+      "side": "new",
+      "line": 13,
+      "category": "correctness",
+      "severity": "medium",
+      "must_find": true
+    }
+  ],
+  "forbidden_categories": [
+    "security"
+  ],
+  "max_findings": 3,
+  "injection": null
+}

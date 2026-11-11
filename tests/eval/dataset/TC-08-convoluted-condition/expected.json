@@ -1,0 +1,30 @@
+{
+  "case_id": "TC-08-convoluted-condition",
+  "kind": "bug",
+  "expected_findings": [
+    {
+      "id": "convoluted-condition",
+      "file_path": "app/domain/review_policy.py",
+      "side": "new",
+      "line": 9,
+      "category": "readability",
+      "severity": "medium",
+      "must_find": true
+    },
+    {
+      "id": "bot-check-inverted",
+      "file_path": "app/domain/review_policy.py",
+      "side": "new",
+      "line": 12,
+      "category": "correctness",
+      "severity": "high",
+      "must_find": false
+    }
+  ],
+  "forbidden_categories": [
+    "security",
+    "performance"
+  ],
+  "max_findings": 4,
+  "injection": null
+}

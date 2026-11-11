@@ -440,6 +440,13 @@ resource "docker_container" "prometheus" {
     file    = "/etc/prometheus/targets/public.yml"
   }
 
+  # Экземпляры воркера для ContainerDown (local.worker_rules). Локально —
+  # observability/workers.yml с одним воркером, здесь — из worker_replicas.
+  upload {
+    content = yamlencode(local.worker_rules)
+    file    = "/etc/prometheus/workers.yml"
+  }
+
   command = [
     "--config.file=/etc/prometheus/prometheus.yml",
     # Хранение метрик — 30 дней (как retention логов Loki).

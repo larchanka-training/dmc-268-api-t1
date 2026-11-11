@@ -1,0 +1,36 @@
+diff --git a/app/domain/billing.py b/app/domain/billing.py
+index 061db69..8feab6a 100644
+--- a/app/domain/billing.py
++++ b/app/domain/billing.py
+@@ -3,11 +3,13 @@
+ from decimal import ROUND_HALF_UP, Decimal
+ 
+ PRICE_PER_1K_TOKENS = Decimal("0.0200")
++_STEP = Decimal("0.0001")
++
++
++def _tokens_cost(tokens: int) -> Decimal:
++    """Стоимость `tokens` токенов, округлённая до сотой доли цента."""
++    return (Decimal(tokens) / 1000 * PRICE_PER_1K_TOKENS).quantize(_STEP, rounding=ROUND_HALF_UP)
+ 
+ 
+ def run_cost(prompt_tokens: int, completion_tokens: int) -> Decimal:
+-    prompt = Decimal(prompt_tokens) / 1000 * PRICE_PER_1K_TOKENS
+-    prompt = prompt.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+-    completion = Decimal(completion_tokens) / 1000 * PRICE_PER_1K_TOKENS
+-    completion = completion.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+-    return prompt + completion
++    return _tokens_cost(prompt_tokens) + _tokens_cost(completion_tokens)
+diff --git a/tests/domain/test_billing.py b/tests/domain/test_billing.py
+index 2a0f955..c0de007 100644
+--- a/tests/domain/test_billing.py
++++ b/tests/domain/test_billing.py
+@@ -5,3 +5,8 @@
+ 
+ def test_run_cost_sums_prompt_and_completion() -> None:
+     assert run_cost(1500, 500) == Decimal("0.0400")
++
++
++def test_run_cost_rounds_each_part_half_up() -> None:
++    # 0.00006 у каждой части округляется вверх до 0.0001 отдельно.
++    assert run_cost(3, 3) == Decimal("0.0002")

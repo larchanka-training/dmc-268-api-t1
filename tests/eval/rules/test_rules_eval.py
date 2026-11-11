@@ -26,9 +26,10 @@ from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
 
 from ...conftest import requires_broker, requires_db, requires_eurorouter
 from ...e2e.stack import Stack
+from ..prompts_hash import prompts_sha256
 from ..report import to_json, to_markdown
 from .corpus import CONFIGS, load_corpus
-from .runner import prompts_sha256, run_corpus
+from .runner import run_corpus
 
 pytestmark = [pytest.mark.eval, requires_db, requires_broker, requires_eurorouter]
 

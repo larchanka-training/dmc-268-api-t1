@@ -57,6 +57,19 @@ jobs:
         run: make cov-llm-schema
       # Контракт API — экспорт схемы из кода; устаревший docs/openapi/openapi.json — провал.
       - run: uv run python scripts/export_openapi.py --check
+      # Офлайн-eval золотого датасета (#57): зафиксированные ответы модели из
+      # tests/eval/dataset/ против разметки, без вызова модели — живой прогон
+      # платный и идёт в eval.yml. Порог LLM_EVAL §6 ниже нормы или датасет не
+      # по контракту — ненулевой код. Команда — цель Makefile, как и выше.
+      - name: Офлайн-eval золотого датасета
+        run: make eval-offline EVAL_REPORT_DIR=eval-offline-report
+      # Отчёт нужен и при упавшем пороге: тогда и видно, какой кейс его уронил.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: eval-offline-report
+          path: eval-offline-report/
+          if-no-files-found: warn
 
   # Ошибка в спеке иначе всплывает только при архиве change: требование без
   # сценария, MODIFIED, теряющий сценарии, ADDED уже существующего требования.
@@ -315,12 +328,13 @@ jobs:
             "$OTELCOL" validate --config=/etc/otelcol-contrib/config.yaml
       # check config проверяет и правила из rule_files, поэтому они смонтированы
       # по тому же пути, что на стенде; цель пробы публичного входа — локальный
-      # пустой список.
+      # пустой список, экземпляры воркера — локальный workers.yml.
       - name: Prometheus (promtool check config)
         run: |
           docker run --rm --entrypoint promtool \
             -v "$PWD/infra/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
             -v "$PWD/infra/observability/alerts.yml:/etc/prometheus/alerts.yml:ro" \
+            -v "$PWD/infra/observability/workers.yml:/etc/prometheus/workers.yml:ro" \
             -v "$PWD/infra/observability/public-targets.yml:/etc/prometheus/targets/public.yml:ro" \
             "$PROM" check config /etc/prometheus/prometheus.yml
       # Поведение алертов #100 — синтетические ряды «горит / молчит» на каждый

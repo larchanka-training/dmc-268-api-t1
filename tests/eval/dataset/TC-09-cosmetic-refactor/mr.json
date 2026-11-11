@@ -1,0 +1,6 @@
+{
+  "title": "refactor: понятные имена в подсчёте сумм заказа",
+  "description": "Переименовал `calc`/`calc_tax` в `calculate_total`/`calculate_tax`, добавил аннотации типов, вынес константу копейки и поднял `TAX_RATE` наверх модуля вместо `__import__`. Поведение не меняется: тесты переименованы, добавлен случай пустого заказа.",
+  "source_branch": "refactor/billing-names",
+  "target_branch": "develop"
+}

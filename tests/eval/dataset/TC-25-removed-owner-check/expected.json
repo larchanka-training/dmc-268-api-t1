@@ -1,0 +1,30 @@
+{
+  "case_id": "TC-25-removed-owner-check",
+  "kind": "bug",
+  "expected_findings": [
+    {
+      "id": "owner-check-removed",
+      "file_path": "app/api/projects.py",
+      "side": "old",
+      "line": 23,
+      "category": "security",
+      "severity": "critical",
+      "must_find": true
+    },
+    {
+      "id": "archive-delete-not-atomic",
+      "file_path": "app/api/projects.py",
+      "side": "new",
+      "line": 23,
+      "category": "correctness",
+      "severity": "medium",
+      "must_find": false
+    }
+  ],
+  "forbidden_categories": [
+    "readability",
+    "performance"
+  ],
+  "max_findings": 2,
+  "injection": null
+}
