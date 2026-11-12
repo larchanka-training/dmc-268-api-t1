@@ -1,0 +1,7 @@
+schema: spec-driven
+created: 2026-11-12
+# Поведение сервиса не меняется: песочница tree-sitter (#253) берёт статусы файлов из
+# ответа этапа сборки контекста, а лишняя обвязка (doctor, grammars.py, флаги
+# --window/--payload) удаляется. Правки только в tests/, scripts/, Makefile и
+# документации; app/ не трогается.
+skip_specs: true

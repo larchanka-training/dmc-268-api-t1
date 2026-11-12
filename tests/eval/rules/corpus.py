@@ -70,29 +70,36 @@ def _expected(files: dict[str, str], raw: dict[str, Any], case_id: str) -> Expec
     )
 
 
-def load_case(path: Path, *, expected_required: bool = True) -> Case:
-    """Кейс из YAML. В корпусе `expected` обязателен: потерянный ключ иначе
-    молча сделал бы кейс «чистым PR»; кейсу песочницы (`--case-file`) - нет."""
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+def case_from_raw(
+    raw: dict[str, Any], case_id: str, *, expected_required: bool = True
+) -> Case:
+    """Кейс из разобранного YAML. В корпусе `expected` обязателен: потерянный ключ
+    иначе молча сделал бы кейс «чистым PR»; кейсу песочницы (`--case-file`) - нет."""
     if expected_required and "expected" not in raw:
-        raise KeyError(f"{path.name}: нет раздела expected (чистый PR - expected: [])")
+        raise KeyError(f"{case_id}: нет раздела expected (чистый PR - expected: [])")
     files = {str(p): str(content) for p, content in raw["files"].items()}
-    expected = tuple(_expected(files, item, path.stem) for item in raw.get("expected") or [])
+    expected = tuple(_expected(files, item, case_id) for item in raw.get("expected") or [])
     # Сопоставление перебирает пары экспоненциально: перебор ловим здесь, до
     # платного вызова модели, а не в match() после него.
     if len(expected) > MAX_EXPECTED_PER_CASE:
         raise ValueError(
-            f"{path.stem}: {len(expected)} эталонных нарушений, допустимо не больше "
+            f"{case_id}: {len(expected)} эталонных нарушений, допустимо не больше "
             f"{MAX_EXPECTED_PER_CASE}"
         )
     return Case(
-        id=path.stem,
+        id=case_id,
         title=raw["title"],
         pr_title=raw["pull_request"]["title"],
         pr_description=raw["pull_request"]["description"],
         files=files,
         expected=expected,
     )
+
+
+def load_case(path: Path, *, expected_required: bool = True) -> Case:
+    """Кейс из файла YAML; id - имя файла без расширения."""
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return case_from_raw(raw, path.stem, expected_required=expected_required)
 
 
 def load_corpus() -> tuple[Case, ...]:

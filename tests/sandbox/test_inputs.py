@@ -35,6 +35,28 @@ def test_load_case_file_rejects_malformed_yaml(tmp_path: Path, text: str) -> Non
         load_case_file(path)
 
 
+def test_load_case_file_not_utf8_is_input_error(tmp_path: Path) -> None:
+    path = tmp_path / "case.yaml"
+    path.write_bytes(b"\xff\xfe")
+
+    with pytest.raises(InputError, match="не в UTF-8"):
+        load_case_file(path)
+
+
+def test_load_case_file_unreadable_is_input_error(tmp_path: Path, monkeypatch) -> None:
+    """`OSError` при чтении - `InputError`: от root и `chmod` не зависит."""
+    path = tmp_path / "case.yaml"
+    path.write_text("title: t\n", encoding="utf-8")
+
+    def read_text(self: Path, *args, **kwargs) -> str:
+        raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    with pytest.raises(InputError, match="не прочитать: Permission denied"):
+        load_case_file(path)
+
+
 @pytest.mark.parametrize("range_spec", ["HEAD", "..HEAD", "HEAD..", "A...B"])
 def test_parse_range_rejects_not_a_two_dot_range(range_spec: str) -> None:
     with pytest.raises(InputError, match="BASE..HEAD"):

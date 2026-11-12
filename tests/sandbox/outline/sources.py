@@ -1,26 +1,22 @@
 """Входы песочницы контура: файл с диапазоном строк и кейс YAML с ключом `lines:`.
 
-База файла - тот же файл, где заданные строки заменены заглушками
-`<песочница: строка N>`. Дифф такого файла строится не `difflib` по тексту, а по
-номерам строк (`touched_diff`): `difflib` сопоставляет одинаковые строки с самым
-ранним вхождением, и неизменённый хвост или промежуток между диапазонами
-съезжает на такую же строку внутри диапазона - затронутым оказывается не тот
-диапазон. Цена - hunk несёт и удалённые заглушки.
+Заданные строки - добавленные: база файла - тот же файл без них. Дифф строится не
+`difflib` по тексту, а сразу по номерам строк (`touched_diff`): `difflib`
+сопоставляет одинаковые строки с самым ранним вхождением, и неизменённый хвост
+или промежуток между диапазонами съезжает на такую же строку внутри диапазона -
+затронутым оказывается не тот диапазон.
 """
 
-import difflib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import yaml
-
 from app.domain.code_context import touched_lines
 from app.domain.diff_parser import parse_diff
 
 from ...fakes.github_api import file_diff
-from ..inputs import InputError, PrInput, load_case_file
+from ..inputs import InputError, PrInput, case_input, read_case_yaml
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,49 +57,58 @@ def parse_lines(spec: str, total: int) -> frozenset[int]:
     return frozenset(lines)
 
 
-def with_touched(head: str, lines: frozenset[int]) -> str:
-    """База файла: строки из `lines` заменены уникальными заглушками."""
+# Строк контекста вокруг затронутых, как у `git diff` и фейкового GitHub.
+CONTEXT_LINES = 3
+
+
+def without_lines(head: str, lines: frozenset[int]) -> str:
+    """База файла: `head` без строк из `lines`."""
     return "".join(
-        f"<песочница: строка {n}>\n" if n in lines else line
+        line
         for n, line in enumerate(head.splitlines(keepends=True), start=1)
+        if n not in lines
     )
 
 
-def _hunk_range(start: int, stop: int) -> str:
-    """Диапазон стороны hunk'а, как у `difflib.unified_diff`."""
-    length = stop - start
-    if length == 1:
-        return str(start + 1)
-    return f"{start if not length else start + 1},{length}"
+def _side(start: int, count: int) -> str:
+    """Сторона заголовка hunk'а; счётчик 1 опускается, как у `difflib`."""
+    return str(start) if count == 1 else f"{start},{count}"
 
 
 def touched_diff(path: str, head: str, lines: frozenset[int]) -> str:
-    """Дифф файла, затрагивающий ровно `lines`: база - `with_touched(head, lines)`.
+    """Дифф файла, добавляющий ровно `lines` к базе `without_lines(head, lines)`.
 
-    Строки сопоставляются по номеру, а не по тексту: неизменённая строка `n`
-    базы - это строка `n` head, и никакая другая. Если разбор диффа всё же даст
-    другие строки - `InputError`, а не чужой контекст в отчёте.
+    Hunk - затронутые строки (`+`) и по `CONTEXT_LINES` строк контекста вокруг;
+    группы, чей контекст сходится, сливаются в один hunk. Если разбор диффа всё
+    же даст другие строки - `InputError`, а не чужой контекст в отчёте.
     """
-    base = with_touched(head, lines).splitlines(keepends=True)
+    # Концы строк как в `head` (`\r\n` тоже): окна и `whole_file` их сохраняют.
     new = head.splitlines(keepends=True)
-
-    def keys(tag: str) -> list[tuple[str, int]]:
-        return [(tag if n in lines else "eq", n) for n in range(1, len(new) + 1)]
-
-    matcher = difflib.SequenceMatcher(None, keys("ph"), keys("new"), autojunk=False)
+    groups: list[list[int]] = []
+    for n in sorted(lines):
+        if groups and n - groups[-1][-1] - 1 <= 2 * CONTEXT_LINES:
+            groups[-1].append(n)
+        else:
+            groups.append([n])
     out = [f"diff --git a/{path} b/{path}\n", f"--- a/{path}\n", f"+++ b/{path}\n"]
-    for group in matcher.get_grouped_opcodes(3):
-        first, last = group[0], group[-1]
+    added_before = 0
+    for group in groups:
+        first = max(1, group[0] - CONTEXT_LINES)
+        last = min(len(new), group[-1] + CONTEXT_LINES)
+        added = sum(1 for n in range(first, last + 1) if n in lines)
+        old_count = last - first + 1 - added
+        old_start = first - added_before - (0 if old_count else 1)
         out.append(
-            f"@@ -{_hunk_range(first[1], last[2])} +{_hunk_range(first[3], last[4])} @@\n"
+            f"@@ -{_side(old_start, old_count)} +{_side(first, last - first + 1)} @@\n"
         )
-        for tag, i1, i2, j1, j2 in group:
-            if tag == "equal":
-                out += (" " + line for line in base[i1:i2])
-                continue
-            out += ("-" + line for line in base[i1:i2])
-            out += ("+" + line for line in new[j1:j2])
-    diff = "".join(line if line.endswith("\n") else line + "\n" for line in out)
+        out += (
+            ("+" if n in lines else " ")
+            + new[n - 1]
+            + ("" if new[n - 1].endswith("\n") else "\n")
+            for n in range(first, last + 1)
+        )
+        added_before += added
+    diff = "".join(out)
     [parsed] = parse_diff(diff)
     got = touched_lines(parsed.hunks)
     if got != lines:
@@ -155,7 +160,7 @@ def from_file(path: Path, lines: str | None) -> OutlinePr:
     if lines is not None:
         try:
             touched = parse_lines(lines, _line_count(text))
-            base[rel] = with_touched(text, touched)
+            base[rel] = without_lines(text, touched)
             diffs[rel] = touched_diff(rel, text, touched)
         except InputError as error:
             raise InputError(f"файл {path}: {error}") from error
@@ -174,14 +179,12 @@ def from_file(path: Path, lines: str | None) -> OutlinePr:
 def load_outline_case(path: Path) -> OutlinePr:
     """Кейс в формате корпуса и необязательный ключ `lines:` (путь → строки).
 
-    Файлы из `lines:` получают базу с заглушками, остальные остаются новыми.
-    Для `make sandbox CASE_FILE=…` ключ безвреден: `load_case_file` его не читает.
+    YAML читается один раз. Файлы из `lines:` получают базу без этих строк,
+    остальные остаются новыми. Для `make sandbox CASE_FILE=…` ключ безвреден:
+    `load_case_file` его не читает.
     """
-    try:
-        pr = load_case_file(path)
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except OSError as error:
-        raise InputError(f"кейс {path} не прочитать: {error.strerror}") from error
+    raw = read_case_yaml(path)
+    pr = case_input(raw, path)
     spec = raw.get("lines")
     if spec is None:
         spec = {}
@@ -202,7 +205,7 @@ def load_outline_case(path: Path) -> OutlinePr:
             diffs[str(file_path)] = touched_diff(str(file_path), head, touched)
         except InputError as error:
             raise InputError(f"кейс {path}: {file_path}: {error}") from error
-        base[str(file_path)] = with_touched(head, touched)
+        base[str(file_path)] = without_lines(head, touched)
     return OutlinePr(
         id=pr.id,
         title=pr.title,
