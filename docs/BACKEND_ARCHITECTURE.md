@@ -230,6 +230,16 @@ AST-окружение, правила владельца), анализ — `Ll
 шаг спан трассировки, а спан обработки сообщения продолжает трейс запроса
 вебхука из заголовка AMQP (раздел «Наблюдаемость»).
 
+**Circuit breaker провайдеров (#294).** У воркера свой breaker на GitHub и на каждого
+провайдера модели: машина состояний — чистые функции `app/domain/circuit_breaker.py`,
+часы и блокировка — `CircuitBreaker` в `app/application/circuit_breaker.py`. Что считать
+отказом, решает адаптер (сеть, таймаут, 5xx — `VcsOutageError`, `LlmUnavailableError`;
+любой ответ провайдера — не отказ), исход пишут `GitHubVcsGateway._request` и
+`FallbackLlmGateway`. Пока GitHub или все провайдеры модели на паузе, `run_review` не
+захватывает прогон, а бросает `ReviewDeferred`: воркер возвращает сообщение `nack` с
+requeue, попытка доставки не тратится. У API breaker'ов нет. Решения —
+`openspec/changes/archive/*-circuit-breaker/design.md`.
+
 У них общие домен, репозитории и база данных, а общаются они через очередь, а
 не по HTTP. Это модульный монолит, а не набор сервисов.
 
@@ -460,7 +470,7 @@ def upgrade() -> None:
   `provider` стоит всегда, `model` — модель ответа только у `ok`, в гистограмму попадают
   упавшие вызовы и таймауты), пул соединений — снимками состояния (`db.client.connection.*`),
   остаток баланса Eurorouter (`review_llm_provider_balance_eur`, опрос `/credits` раз в
-  5 минут). Расход токенов и стоимость за месяц для алертов бюджета снимает коллектор
+  5 минут), состояние breaker'ов провайдеров (`review_circuit_breaker_state{provider}`). Расход токенов и стоимость за месяц для алертов бюджета снимает коллектор
   SQL-запросом по `review_runs` (`review_llm_tokens_month`, `review_llm_cost_eur_month`).
   Отказ провайдера модели по HTTP пишется в лог с его `x-request-id` (поле
   `review.llm.request_id`), он же — атрибут спана httpx. Какие метрики есть и откуда — таблица

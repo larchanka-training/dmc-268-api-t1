@@ -92,6 +92,25 @@ def test_provider_balance_rules_read_the_worker_gauge() -> None:
         assert _alerts()[name]["labels"]["service"] != _alerts()["LlmBudgetExceeded"]["labels"]["service"]
 
 
+def test_circuit_breaker_rules_read_the_worker_gauge() -> None:
+    """#294: алерт и глушение зависаний читают gauge, который пишет воркер."""
+    metric = "review_circuit_breaker_state"
+    assert f'"{metric}"' in (REPO / "app" / "infrastructure" / "telemetry.py").read_text(encoding="utf-8")
+    for name in ("ProviderCircuitOpen", "LlmProviderCircuitOpen", "WorkerStalled", "ReviewJobStuck"):
+        assert metric in _alerts()[name]["expr"], name
+    # Провайдер с живым фоллбэком — warning со своим service: critical воркера его не глушит.
+    assert _alerts()["LlmProviderCircuitOpen"]["labels"] == {"severity": "warning", "service": "llm-provider"}
+    # Зависание глушится тем же условием, что откладывает прогоны (`deferral`): разомкнут (2),
+    # а не любой breaker и не застрявшее «ждёт пробы».
+    deferring = 'min by (instance) (max_over_time(review_circuit_breaker_state{provider!="GitHub"}[15m])) == 2'
+    assert deferring in _alerts()["WorkerStalled"]["expr"]
+    assert deferring in _alerts()["ReviewJobStuck"]["expr"]
+    # Глушит, только когда откладывают все экземпляры воркера (#99), а не любой из них.
+    every_instance = "== count(count by (instance) (max_over_time(review_circuit_breaker_state[15m])))"
+    assert every_instance in _alerts()["WorkerStalled"]["expr"]
+    assert every_instance in _alerts()["ReviewJobStuck"]["expr"]
+
+
 def test_backup_mark_matches_the_rule() -> None:
     metric = "dmc268_backup_last_success_timestamp_seconds"
     assert metric in BACKUP_SCRIPT.read_text(encoding="utf-8")

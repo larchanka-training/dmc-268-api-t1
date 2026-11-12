@@ -6,11 +6,19 @@ from dataclasses import replace
 import pytest
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
+from app.application.circuit_breaker import CircuitBreaker
 from app.application.llm_schema import ReviewOutput
 from app.application.ports.llm_gateway import LlmMeter, LlmRequest, LlmTask
+from app.domain.circuit_breaker import BreakerPolicy
 from app.domain.entities import PromptMessage
 from app.domain.enums import PromptRole
-from app.domain.llm_errors import LlmError, LlmOutputError, LlmTimeoutError
+from app.domain.llm_errors import (
+    LlmError,
+    LlmOutputError,
+    LlmRateLimitedError,
+    LlmTimeoutError,
+    LlmUnavailableError,
+)
 from app.infrastructure.llm.fallback import FallbackLlmGateway
 
 from ..fakes.llm_gateway import ScriptedLlmGateway, review_response, spent
@@ -251,3 +259,80 @@ def test_calls_create_no_token_counter(
     gateway.complete(REQUEST)
 
     assert [key for key in metric_snapshot(metric_reader) if key[0] == "review_llm_tokens"] == []
+
+
+# --- breaker'ы провайдеров (#294) -------------------------------------------
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _breakers(clock: _Clock, *names: str) -> dict[str, CircuitBreaker]:
+    policy = BreakerPolicy(failure_threshold=1, pause_seconds=60.0, max_pause_seconds=600.0)
+    return {name: CircuitBreaker(name, policy, clock=clock) for name in names}
+
+
+def test_an_unavailable_provider_is_skipped_while_its_breaker_is_open() -> None:
+    """Ollama не ответила — на паузе следующий запрос идёт сразу в Eurorouter, без её таймаута."""
+    clock = _Clock()
+    local = ScriptedLlmGateway([LlmTimeoutError("Ollama: таймаут")])
+    hosted = ScriptedLlmGateway([review_response(model="a"), review_response(model="b")])
+    gateway = FallbackLlmGateway(
+        (("Ollama", local), ("Eurorouter", hosted)), breakers=_breakers(clock, "Ollama", "Eurorouter")
+    )
+
+    gateway.complete(REQUEST)
+    response = gateway.complete(REQUEST)
+
+    assert response.model == "b"
+    assert local.requests == [REQUEST]
+
+
+def test_every_provider_paused_fails_at_once_without_calls() -> None:
+    clock = _Clock()
+    provider = ScriptedLlmGateway([LlmUnavailableError("Eurorouter: HTTP 503")])
+    gateway = FallbackLlmGateway((("Eurorouter", provider),), breakers=_breakers(clock, "Eurorouter"))
+
+    with pytest.raises(LlmUnavailableError, match="503"):
+        gateway.complete(REQUEST)
+    with pytest.raises(LlmUnavailableError, match="паузе"):
+        gateway.complete(REQUEST)
+    assert provider.requests == [REQUEST]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        LlmOutputError("ответ не по схеме"),
+        LlmRateLimitedError("лимит на всех ключах"),
+        LlmError("Eurorouter: HTTP 400"),
+    ],
+    ids=["schema", "429", "4xx"],
+)
+def test_a_provider_that_answered_with_an_error_is_not_paused(answer: LlmError) -> None:
+    """Ответ не по схеме, 429 всех ключей, 4xx — провайдер жив: breaker не размыкается и с порогом 1."""
+    clock = _Clock()
+    provider = ScriptedLlmGateway([answer, review_response(model="m")])
+    gateway = FallbackLlmGateway((("Eurorouter", provider),), breakers=_breakers(clock, "Eurorouter"))
+
+    with pytest.raises(type(answer)):
+        gateway.complete(REQUEST)
+
+    assert gateway.complete(REQUEST).model == "m"
+
+
+def test_after_the_pause_the_provider_is_probed_again() -> None:
+    clock = _Clock()
+    provider = ScriptedLlmGateway([LlmTimeoutError("таймаут"), review_response(model="m")])
+    gateway = FallbackLlmGateway((("Ollama", provider),), breakers=_breakers(clock, "Ollama"))
+
+    with pytest.raises(LlmTimeoutError):
+        gateway.complete(REQUEST)
+    clock.now += 60.0
+
+    assert gateway.complete(REQUEST).model == "m"

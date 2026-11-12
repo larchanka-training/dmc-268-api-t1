@@ -94,6 +94,18 @@ class ReviewNotStarted(Exception):
     """
 
 
+class ReviewDeferred(Exception):
+    """Провайдер на паузе breaker'а (#294): прогон не захвачен и остался `queued`.
+
+    Не сбой: воркер вернёт сообщение в очередь, не тратя попытку доставки, через
+    `retry_after` секунд — к пробному вызову.
+    """
+
+    def __init__(self, retry_after: float) -> None:
+        super().__init__(f"провайдер на паузе ещё {retry_after:.0f} с")
+        self.retry_after = retry_after
+
+
 def _claim(uow: UnitOfWork, run: ReviewRun, now: datetime) -> ReviewRun | None:
     """Захватить прогон из `queued`; `None` — его уже изменил кто-то другой."""
     claimed = advance(run, ReviewRunStatus.BUILDING_CONTEXT, now).unwrap()
@@ -334,6 +346,7 @@ def run_review(
     stage_tracer: StageTracer = NO_STAGE_TRACING,
     run_outcome: RunOutcomeRecorder = NO_RUN_OUTCOME,
     billing_enabled: bool = False,
+    paused_for: Callable[[], float | None] = lambda: None,
 ) -> None:
     """Довести прогон до терминального состояния.
 
@@ -355,6 +368,8 @@ def run_review(
     отклоняет сообщение, и оно попадает в DLQ для разбора (`job-queue`). Сбой до
     захвата — чтения или самого захвата — прогон не трогает и бросается
     `ReviewNotStarted`: воркер вернёт сообщение в очередь на повтор (#157).
+    `paused_for` — сколько ещё ждать провайдеров на паузе breaker'а (`deferral`);
+    не `None` — прогон не захватывается, а откладывается `ReviewDeferred` (#294).
     Сбои правил и AST-окружения шагом не считаются — их гасит сборка
     контекста, деградируя пакет (`context-assembly`). Сбой верификатора -
     тоже: публикуются замечания, прошедшие отсев, итог - `unavailable`.
@@ -379,6 +394,9 @@ def run_review(
         # на `publishing` он дал бы второе ревью. Брошенный выметет очистка (#169).
         logger.warning("прогон уже в работе (%s), сообщение подтверждается", run.status)
         return
+    # До захвата: на паузе прогон ждёт в `queued`, а не падает на таймаутах провайдера.
+    if (wait := paused_for()) is not None:
+        raise ReviewDeferred(wait)
 
     started_at = monotonic()
     # Расход всех вызовов модели прогона: адаптер пишет сюда каждый ответ

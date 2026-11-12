@@ -19,7 +19,7 @@ import hmac
 import json
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -171,12 +171,20 @@ class Stack:
         return app
 
     def work(
-        self, llm: LlmGateway, messages: int, *, timeout: float = WORK_TIMEOUT_SECONDS
+        self,
+        llm: LlmGateway,
+        messages: int,
+        *,
+        timeout: float = WORK_TIMEOUT_SECONDS,
+        paused_for: Callable[[], float | None] = lambda: None,
+        max_defer: float = 0.0,
     ) -> None:
         """Воркер обрабатывает `messages` сообщений из очереди и останавливается.
 
         Consume-цикл без сообщений крутится вечно, поэтому он идёт в потоке с
-        дедлайном: зависание роняет тест, а не весь прогон CI.
+        дедлайном: зависание роняет тест, а не весь прогон CI. `paused_for` —
+        пауза breaker'ов (#294); отложенное сообщение возвращается через
+        `max_defer` секунд, по умолчанию сразу: часы breaker'а у сценария свои.
         """
         container = self.container(llm)
         handler = build_review_handler(
@@ -184,13 +192,14 @@ class Stack:
             context_limits(self.settings),
             llm_limits(self.settings),
             load_checked_prompt_texts(self.settings, DEFAULT_PROMPTS_DIR),
+            paused_for=paused_for,
         )
         worker = build_worker(self.settings)
         errors: list[BaseException] = []
 
         def consume() -> None:
             try:
-                worker.run(handler, limit=messages)
+                worker.run(handler, limit=messages, max_defer=max_defer)
             except BaseException as error:  # noqa: BLE001 — переносится в поток теста
                 errors.append(error)
 
@@ -325,6 +334,8 @@ def process_container(
         ),
         # Оплаты Stripe стенд не принимает.
         _stripe_client=None,
+        # Breaker'ы стенд собирает сам там, где сценарий их проверяет (tests/chaos).
+        _breakers=None,
     )
 
 

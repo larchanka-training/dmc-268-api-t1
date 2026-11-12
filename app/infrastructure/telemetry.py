@@ -62,7 +62,7 @@ import logging
 import os
 import time
 import warnings
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextvars import Token
 from typing import Any
 from uuid import UUID
@@ -119,7 +119,9 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 from sqlalchemy import Engine
 from sqlalchemy.pool import QueuePool
 
+from app.application.circuit_breaker import CircuitBreaker
 from app.application.ports.run_outcome import RUN_REFUSED
+from app.domain.circuit_breaker import BreakerState
 from app.domain.enums import ReviewRunStage, ReviewRunStatus
 
 logger = logging.getLogger(__name__)
@@ -671,6 +673,29 @@ def instrument_llm_balance(balance: Callable[[], float | None]) -> None:
         # В фигурных скобках — аннотация: экспортёр Prometheus не дописывает её к имени ряда.
         unit="{EUR}",
         description="Остаток баланса провайдера модели (Eurorouter), евро.",
+    )
+
+
+# Значение gauge breaker'а: чем больше, тем хуже; `> 0` — провайдер не доказал, что жив.
+_BREAKER_STATE_VALUE = {BreakerState.CLOSED: 0, BreakerState.HALF_OPEN: 1, BreakerState.OPEN: 2}
+
+
+def instrument_circuit_breakers(breakers: Sequence[CircuitBreaker]) -> None:
+    """Состояние breaker'а провайдера (#294) — observable gauge `review_circuit_breaker_state`.
+
+    Метка `provider` — имя провайдера (`GitHub`, `Ollama`, `Eurorouter`); значение — 0
+    замкнут, 1 пауза вышла и ждёт пробного вызова, 2 разомкнут. Состояние читается на
+    каждом сборе: пауза кончается без вызова, и ряд это видит.
+    """
+
+    def _observe(_options: metrics.CallbackOptions) -> Iterator[metrics.Observation]:
+        for breaker in breakers:
+            yield metrics.Observation(_BREAKER_STATE_VALUE[breaker.state()], {"provider": breaker.provider})
+
+    _meter.create_observable_gauge(
+        "review_circuit_breaker_state",
+        callbacks=[_observe],
+        description="Состояние breaker'а провайдера: 0 замкнут, 1 ждёт пробы, 2 разомкнут.",
     )
 
 

@@ -18,7 +18,7 @@ import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind, StatusCode
 
-from app.application.review_pipeline import ReviewNotStarted
+from app.application.review_pipeline import ReviewDeferred, ReviewNotStarted
 from app.config import Settings
 from app.domain.llm_errors import LlmTimeoutError
 from app.infrastructure.queue.rabbitmq import CONSUMER_ARGUMENTS, to_wire_message
@@ -467,3 +467,53 @@ def test_a_consumer_cancelled_by_the_broker_is_logged(caplog: pytest.LogCaptureF
     assert channel.consumer_arguments == CONSUMER_ARGUMENTS
     (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert "отменил потребителя" in record.getMessage()
+
+
+def _deferring(retry_after: float) -> Any:
+    def handler(body: bytes) -> None:
+        raise ReviewDeferred(retry_after)
+
+    return handler
+
+
+def test_a_deferred_run_waits_until_the_probe_and_returns_without_spending_a_delivery() -> None:
+    """#294: провайдер на паузе — сообщение ждёт до пробы циклом соединения и возвращается
+    `nack` с requeue: `basic.reject` потратил бы попытку доставки, а пауза бывает длиннее всех."""
+    channel = _strict([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
+    connection = FakeConnection()
+
+    _worker(channel, connection).run(_deferring(3.0), limit=1)
+
+    assert sum(connection.slept) == 3.0
+    assert all(step <= 1 for step in connection.slept)
+    assert channel.rejected == [] and channel.acked == []
+    assert channel.events == ["cancel", "requeue 1"]
+
+
+def test_a_long_pause_is_waited_in_slices_of_the_loop() -> None:
+    """Пауза breaker'а до 10 минут: сообщение держится не дольше `max_defer`, потом уходит
+    в очередь и откладывается снова — очистка и остановка не ждут всю паузу."""
+    channel = _strict([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
+    connection = FakeConnection()
+
+    _worker(channel, connection).run(_deferring(600.0), limit=1)
+
+    assert sum(connection.slept) == factory.MAX_DEFER_SECONDS
+    assert channel.events[-1] == "requeue 1"
+
+
+def test_a_stop_request_cuts_the_defer_pause_short() -> None:
+    channel = _strict([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
+    stop = StopRequest()
+
+    class StoppedConnection(FakeConnection):
+        def sleep(self, duration: float) -> None:
+            super().sleep(duration)
+            stop.requested = True
+
+    connection = StoppedConnection()
+
+    _worker(channel, connection).run(_deferring(30.0), stop=stop)
+
+    assert connection.slept == [1]
+    assert channel.events == ["requeue 1"]

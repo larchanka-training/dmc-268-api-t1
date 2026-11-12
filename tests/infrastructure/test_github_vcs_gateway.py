@@ -13,7 +13,9 @@ from typing import Any
 import httpx
 import pytest
 
+from app.application.circuit_breaker import CircuitBreaker
 from app.domain import vcs_errors
+from app.domain.circuit_breaker import BreakerPolicy
 from app.domain.entities import PRMetadata
 from app.domain.enums import MergeRequestState
 from app.domain.vcs_errors import VcsFileTooLargeError
@@ -21,6 +23,7 @@ from app.infrastructure.vcs.errors import (
     VcsAuthError,
     VcsError,
     VcsNotFoundError,
+    VcsOutageError,
     VcsUnavailableError,
 )
 from app.infrastructure.vcs.github import GitHubVcsGateway
@@ -958,3 +961,141 @@ def test_resolve_branch_sha_non_sha_body_is_a_vcs_error(rsa_key_pair: RsaKeyPair
 
     with pytest.raises(VcsError):
         gateway.resolve_branch_sha("owner/repo", "develop", INSTALLATION_ID)
+
+
+# --- breaker GitHub (#294) ---------------------------------------------------
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _guarded(
+    rsa_key_pair: RsaKeyPair, handler: Handler, clock: _Clock, threshold: int = 1
+) -> GitHubVcsGateway:
+    client = httpx.Client(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    auth = GitHubAppAuth(APP_ID, rsa_key_pair.private_pem, client)
+    breaker = CircuitBreaker(
+        "GitHub", BreakerPolicy(failure_threshold=threshold, pause_seconds=60.0, max_pause_seconds=600.0), clock=clock
+    )
+    return GitHubVcsGateway(
+        auth, client, sleep=lambda _: None, clock=lambda: 1_800_000_000.0, breaker=breaker
+    )
+
+
+def _metadata(gateway: GitHubVcsGateway) -> PRMetadata:
+    return gateway.fetch_pr_metadata("owner/repo", 6, INSTALLATION_ID)
+
+
+def test_exhausted_5xx_open_the_breaker_and_the_next_request_is_not_sent(rsa_key_pair: RsaKeyPair) -> None:
+    """5xx до конца попыток — отказ GitHub: на паузе запрос не уходит и не ждёт backoff."""
+    seen: list[httpx.Request] = []
+    gateway = _guarded(rsa_key_pair, responding([502], httpx.Response(200, json=PR_JSON), seen), _Clock())
+
+    with pytest.raises(VcsOutageError):
+        _metadata(gateway)
+    sent = len(seen)
+    with pytest.raises(VcsUnavailableError, match="паузе breaker'а") as paused:
+        _metadata(gateway)
+
+    assert not isinstance(paused.value, VcsOutageError)
+    assert len(seen) == sent == 3
+
+
+def test_a_network_failure_opens_the_breaker(rsa_key_pair: RsaKeyPair) -> None:
+    seen: list[httpx.Request] = []
+    gateway = _guarded(rsa_key_pair, failing_transport(True, seen), _Clock())
+
+    with pytest.raises(VcsOutageError):
+        _metadata(gateway)
+    with pytest.raises(VcsUnavailableError, match="паузе"):
+        _metadata(gateway)
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [
+        pytest.param(lambda seen: responding([404], httpx.Response(200, json={}), seen), id="404"),
+        pytest.param(lambda seen: responding([403], httpx.Response(200, json={}), seen), id="403"),
+        pytest.param(
+            lambda seen: responding([429], httpx.Response(200, json={}), seen),
+            id="лимит",
+        ),
+    ],
+)
+def test_an_answer_of_github_is_not_a_failure(rsa_key_pair: RsaKeyPair, handler: Any) -> None:
+    """4xx и исчерпанный лимит — GitHub ответил: breaker не размыкается и с порогом 1."""
+    seen: list[httpx.Request] = []
+    gateway = _guarded(rsa_key_pair, handler(seen), _Clock())
+
+    for _ in range(2):
+        before = len(seen)
+        with pytest.raises(VcsError) as raised:
+            _metadata(gateway)
+        assert not isinstance(raised.value, VcsOutageError)
+        assert len(seen) > before  # запрос ушёл: breaker замкнут
+
+
+def test_after_the_pause_a_probe_goes_out_and_an_answer_closes_the_breaker(rsa_key_pair: RsaKeyPair) -> None:
+    statuses = [500, 500, 500, 200]
+    seen: list[httpx.Request] = []
+    clock = _Clock()
+    gateway = _guarded(rsa_key_pair, responding(statuses, httpx.Response(200, json=PR_JSON), seen), clock)
+
+    with pytest.raises(VcsOutageError):
+        _metadata(gateway)
+    clock.now += 60.0
+
+    assert _metadata(gateway) == EXPECTED_METADATA
+    assert len(seen) == 4
+    assert _metadata(gateway) == EXPECTED_METADATA  # замкнут: запросы идут
+
+
+def test_failures_count_in_a_row_across_requests(rsa_key_pair: RsaKeyPair) -> None:
+    """Порог 2: первый исчерпанный 5xx breaker не размыкает, второй — размыкает."""
+    seen: list[httpx.Request] = []
+    gateway = _guarded(rsa_key_pair, responding([500], httpx.Response(200, json={}), seen), _Clock(), threshold=2)
+
+    for _ in range(2):
+        with pytest.raises(VcsOutageError):
+            _metadata(gateway)
+    with pytest.raises(VcsUnavailableError, match="паузе"):
+        _metadata(gateway)
+    assert len(seen) == 6
+
+
+def test_503_on_the_installation_token_opens_the_breaker(rsa_key_pair: RsaKeyPair) -> None:
+    """Кэш токенов истёк, а GitHub лежит: отказ выдачи токена размыкает breaker, следующий
+    запрос не уходит — прогон отложится, а не упадёт с `SCM_AUTH_ERROR`."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(503, json={"message": "Service Unavailable"})
+
+    gateway = _guarded(rsa_key_pair, handler, _Clock())
+
+    with pytest.raises(VcsOutageError):
+        _metadata(gateway)
+    with pytest.raises(VcsUnavailableError, match="паузе"):
+        _metadata(gateway)
+    assert [r.url.path for r in seen] == [f"/app/installations/{INSTALLATION_ID}/access_tokens"]
+
+
+def test_get_app_is_not_sent_during_the_pause(rsa_key_pair: RsaKeyPair) -> None:
+    """Slug ещё не в кэше, breaker разомкнут: `GET /app` не уходит, как любой вызов GitHub."""
+    seen: list[httpx.Request] = []
+    gateway = _guarded(rsa_key_pair, responding([502], httpx.Response(200, json=PR_JSON), seen), _Clock())
+
+    with pytest.raises(VcsOutageError):
+        _metadata(gateway)
+    sent = len(seen)
+    with pytest.raises(VcsUnavailableError, match="паузе breaker'а"):
+        gateway.app_slug()
+
+    assert len(seen) == sent

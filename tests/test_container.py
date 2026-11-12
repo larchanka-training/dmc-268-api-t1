@@ -17,6 +17,7 @@ from app.config import Settings
 from app.infrastructure.container import (
     CABINET_VCS_LIMITS,
     WORKER_VCS_LIMITS,
+    build_breakers,
     build_container,
     llm_http_timeout,
 )
@@ -396,3 +397,38 @@ def test_the_stripe_client_waits_5_seconds_and_does_not_retry() -> None:
     # Публичного чтения настроек у StripeClient нет: смотрим в приватный `_requestor` SDK.
     assert client._requestor._client._timeout == 5  # type: ignore[union-attr]
     assert client._requestor._options.max_network_retries == 0  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ({"llm_backend": "stub"}, []),
+        (LOCAL, ["Ollama"]),
+        ({**LOCAL, **HOSTED, "llm_hosted_fallback": True}, ["Ollama", "Eurorouter"]),
+        ({"llm_backend": "eurorouter", **HOSTED}, ["Eurorouter"]),
+    ],
+    ids=["stub", "ollama", "ollama-fallback", "eurorouter"],
+)
+def test_a_breaker_per_provider_a_run_can_reach(model: dict[str, object], expected: list[str]) -> None:
+    """#294: GitHub и каждый провайдер фоллбэка, имена — те же, что у провайдеров фоллбэка."""
+    breakers = build_breakers(_model_settings(**model))
+
+    assert breakers.vcs.provider == "GitHub"
+    assert list(breakers.llm) == expected
+    assert [b.provider for b in breakers.all()] == ["GitHub", *expected]
+
+
+def test_the_worker_gateways_share_the_github_breaker_and_the_api_has_none() -> None:
+    """Обработчик и проход очистки зовут один GitHub — состояние общее; API отказ вебхука
+    отдаёт GitHub на переотправку и без breaker'а."""
+    settings = _model_settings(**LOCAL, **HOSTED, llm_hosted_fallback=True)
+    breakers = build_breakers(settings)
+    worker = build_container(settings, vcs_limits=WORKER_VCS_LIMITS, breakers=breakers)
+
+    assert worker.vcs_gateway()._breaker is breakers.vcs
+    assert worker.redelivery_vcs_gateway()._breaker is breakers.vcs  # type: ignore[attr-defined]
+    gateway = worker.llm_gateway()
+    assert isinstance(gateway, FallbackLlmGateway)
+    assert gateway._breakers == breakers.llm
+    assert [name for name, _ in gateway._providers] == list(breakers.llm)
+    assert build_container(settings).vcs_gateway()._breaker is None

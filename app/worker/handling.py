@@ -7,7 +7,7 @@ pika здесь нет: решение не зависит от протокол
 
 from enum import Enum
 
-from app.application.review_pipeline import ReviewNotStarted
+from app.application.review_pipeline import ReviewDeferred, ReviewNotStarted
 
 
 class Decision(Enum):
@@ -16,6 +16,9 @@ class Decision(Enum):
     # Прогон не начат из-за временного сбоя — вернуть в очередь. Повтор тратит попытку
     # доставки: после лимита (`DELIVERY_LIMIT`) брокер сам уведёт сообщение в DLQ.
     RETRY = "retry"
+    # Провайдер на паузе breaker'а (#294) — вернуть в очередь, не тратя попытку доставки:
+    # пауза может длиться дольше всех `DELIVERY_LIMIT` повторов.
+    DEFER = "defer"
     # Сбой после захвата прогона или битое сообщение — в DLQ для разбора.
     DEAD_LETTER = "dead_letter"
 
@@ -23,6 +26,8 @@ class Decision(Enum):
 def decide(exc: BaseException | None) -> Decision:
     if exc is None:
         return Decision.ACK
+    if isinstance(exc, ReviewDeferred):
+        return Decision.DEFER
     if isinstance(exc, ReviewNotStarted):
         return Decision.RETRY
     return Decision.DEAD_LETTER

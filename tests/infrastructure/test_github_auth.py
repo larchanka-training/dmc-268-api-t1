@@ -12,7 +12,11 @@ import httpx
 import jwt as pyjwt
 import pytest
 
-from app.infrastructure.vcs.errors import VcsAuthError, VcsUnavailableError
+from app.infrastructure.vcs.errors import (
+    VcsAuthError,
+    VcsOutageError,
+    VcsUnavailableError,
+)
 from app.infrastructure.vcs.github_auth import GitHubAppAuth
 from tests.infrastructure.conftest import RsaKeyPair
 
@@ -124,6 +128,18 @@ def test_token_endpoint_error_raises_vcs_auth_error(
     auth = make_auth(rsa_key_pair.private_pem, handler)
 
     with pytest.raises(VcsAuthError):
+        auth.installation_token(INSTALLATION_ID)
+
+
+def test_token_endpoint_5xx_is_an_outage_not_an_auth_error(rsa_key_pair: RsaKeyPair) -> None:
+    """503 на выдаче токена — GitHub лежит, а не ключ плохой: `VcsOutageError` (#294)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"message": "Service Unavailable"})
+
+    auth = make_auth(rsa_key_pair.private_pem, handler)
+
+    with pytest.raises(VcsOutageError, match="HTTP 503"):
         auth.installation_token(INSTALLATION_ID)
 
 
