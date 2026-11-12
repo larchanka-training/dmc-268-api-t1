@@ -172,7 +172,9 @@ groups:
       # живом фоллбэке — прогоны идут, и зависание по-прежнему видно. Breaker у
       # каждого экземпляра воркера свой (#99, лейбл instance): алерт молчит, только
       # когда откладывают все экземпляры, — разомкнутый breaker одного не глушит
-      # зависание остальных.
+      # зависание остальных. Экземпляры справа — за то же окно, что слева: иначе
+      # снятый (worker_replicas 2 → 1), но откладывавший экземпляр ещё 15 минут
+      # считался бы откладывающим, а в числе экземпляров его уже не было бы.
       - alert: WorkerStalled
         expr: |
           min_over_time(rabbitmq_queue_messages_ready{queue="review_jobs.qq"}[15m]) > 0
@@ -183,7 +185,7 @@ groups:
               max by (instance) (max_over_time(review_circuit_breaker_state{provider="GitHub"}[15m])) == 2
               or min by (instance) (max_over_time(review_circuit_breaker_state{provider!="GitHub"}[15m])) == 2
             )
-            == count(count by (instance) (review_circuit_breaker_state))
+            == count(count by (instance) (max_over_time(review_circuit_breaker_state[15m])))
           )
         labels:
           severity: critical
@@ -216,7 +218,7 @@ groups:
               max by (instance) (max_over_time(review_circuit_breaker_state{provider="GitHub"}[15m])) == 2
               or min by (instance) (max_over_time(review_circuit_breaker_state{provider!="GitHub"}[15m])) == 2
             )
-            == count(count by (instance) (review_circuit_breaker_state))
+            == count(count by (instance) (max_over_time(review_circuit_breaker_state[15m])))
           )
         labels:
           severity: critical

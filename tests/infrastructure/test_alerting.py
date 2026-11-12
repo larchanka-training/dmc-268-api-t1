@@ -106,7 +106,7 @@ def test_circuit_breaker_rules_read_the_worker_gauge() -> None:
     assert deferring in _alerts()["WorkerStalled"]["expr"]
     assert deferring in _alerts()["ReviewJobStuck"]["expr"]
     # Глушит, только когда откладывают все экземпляры воркера (#99), а не любой из них.
-    every_instance = "== count(count by (instance) (review_circuit_breaker_state))"
+    every_instance = "== count(count by (instance) (max_over_time(review_circuit_breaker_state[15m])))"
     assert every_instance in _alerts()["WorkerStalled"]["expr"]
     assert every_instance in _alerts()["ReviewJobStuck"]["expr"]
 

@@ -765,6 +765,33 @@ tests:
         alertname: ReviewJobStuck
         exp_alerts: *review_job_stuck
 
+  # worker_replicas 2 → 1 (#99): снятый dmc268-worker-2 откладывал, его ряды кончились
+  # на 5-й минуте, оставшийся dmc268-worker замкнут и завис. Снятый ещё в окне слева,
+  # но и в числе экземпляров справа — за то же окно: откладывает не весь пул, алерты горят.
+  - interval: 1m
+    input_series:
+      - series: 'review_circuit_breaker_state{job="dmc-268-worker", instance="dmc268-worker", provider="GitHub"}'
+        values: "0x42"
+      - series: 'review_circuit_breaker_state{job="dmc-268-worker", instance="dmc268-worker-2", provider="GitHub"}'
+        values: "2x5 _x37"
+      - series: 'rabbitmq_queue_messages{queue="review_jobs.qq"}'
+        values: "3x42"
+      - series: 'rabbitmq_queue_messages_ready{queue="review_jobs.qq"}'
+        values: "2x42"
+      - series: 'rabbitmq_queue_messages_unacked{queue="review_jobs.qq"}'
+        values: "1x42"
+      - series: 'rabbitmq_queue_consumers{queue="review_jobs.qq"}'
+        values: "1x42"
+      - series: 'rabbitmq_global_messages_acknowledged_total{protocol="amqp091", queue_type="rabbit_quorum_queue"}'
+        values: "80x42"
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: WorkerStalled
+        exp_alerts: *worker_stalled
+      - eval_time: 18m
+        alertname: ReviewJobStuck
+        exp_alerts: *review_job_stuck
+
   # Оба воркера откладывают: breaker GitHub разомкнут у обоих — алерты зависания молчат.
   - interval: 1m
     input_series:
