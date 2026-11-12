@@ -82,7 +82,8 @@ def touched_diff(path: str, head: str, lines: frozenset[int]) -> str:
     группы, чей контекст сходится, сливаются в один hunk. Если разбор диффа всё
     же даст другие строки - `InputError`, а не чужой контекст в отчёте.
     """
-    new = head.splitlines()
+    # Концы строк как в `head` (`\r\n` тоже): окна и `whole_file` их сохраняют.
+    new = head.splitlines(keepends=True)
     groups: list[list[int]] = []
     for n in sorted(lines):
         if groups and n - groups[-1][-1] - 1 <= 2 * CONTEXT_LINES:
@@ -101,7 +102,10 @@ def touched_diff(path: str, head: str, lines: frozenset[int]) -> str:
             f"@@ -{_side(old_start, old_count)} +{_side(first, last - first + 1)} @@\n"
         )
         out += (
-            ("+" if n in lines else " ") + new[n - 1] + "\n" for n in range(first, last + 1)
+            ("+" if n in lines else " ")
+            + new[n - 1]
+            + ("" if new[n - 1].endswith("\n") else "\n")
+            for n in range(first, last + 1)
         )
         added_before += added
     diff = "".join(out)

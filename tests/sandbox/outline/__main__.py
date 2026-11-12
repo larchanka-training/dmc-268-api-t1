@@ -146,12 +146,22 @@ def _indented(text: str, prefix: str = "    ") -> str:
 
 
 def _problems(pr: PrOutline) -> list[str]:
-    """Проблемы PR: дифф не получен или в видимом `omitted` - сбой загрузки или разбора."""
+    """Проблемы PR: дифф не получен, в видимом `omitted` - сбой загрузки или разбора,
+    или упал разбор `--full-outline`, а урезанный `omitted` сбой не показал."""
     problems = [f"дифф не получен: {pr.error}"] if pr.error else []
-    problems += [
-        f"{entry['path']}: {entry['reason']}"
+    broken = [
+        entry
         for entry in pr.omitted
         if entry["part"] == "ast" and entry["reason"] in _BROKEN_REASONS
+    ]
+    problems += [f"{entry['path']}: {entry['reason']}" for entry in broken]
+    shown = {entry["path"] for entry in broken}
+    problems += [
+        f"{sanitize(file.path)}: разбор упал: {file.outline.error}"
+        for file in pr.files
+        if file.outline is not None
+        and file.outline.error is not None
+        and sanitize(file.path) not in shown
     ]
     return problems
 

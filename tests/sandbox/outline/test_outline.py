@@ -171,6 +171,13 @@ def test_touched_diff_without_trailing_newline() -> None:
     assert diff.endswith("+b\n")
 
 
+def test_touched_diff_keeps_crlf() -> None:
+    """Концы строк `\r\n` в hunk те же, что в окнах и `whole_file` фейкового GitHub."""
+    diff = touched_diff("m.py", "a\r\nb\r\nc\r\n", frozenset({2}))
+
+    assert diff.endswith("@@ -1,2 +1,3 @@\n a\r\n+b\r\n c\r\n")
+
+
 def test_touched_diff_is_exact_on_random_ranges_of_repo_files() -> None:
     """Случайные диапазоны, одиночные и парами, по файлам репозитория."""
     rnd = random.Random(236)
@@ -470,6 +477,22 @@ def test_problems_flag_files_the_fake_github_should_have_served(reason: str) -> 
     entry = {"path": "a.py", "part": "ast", "reason": reason}
 
     assert _problems(dataclasses.replace(outline, omitted=(entry,))) == [f"a.py: {reason}"]
+
+
+def test_problems_flag_full_outline_failure_missing_from_truncated_omitted(monkeypatch) -> None:
+    """Урезанный `omitted` без `parse_error`: сбой `--full-outline` всё равно проблема."""
+
+    def extract(self, source: str, language: object) -> None:
+        raise RuntimeError("сломан")
+
+    monkeypatch.setattr(TreeSitterDefinitionExtractor, "extract", extract)
+    [outline] = run_outline(
+        [_pr("bad", {}, {"m.py": "x = 1\n"})], SandboxConfig(), full_outline=True
+    )
+
+    assert _problems(dataclasses.replace(outline, omitted=())) == [
+        "m.py: разбор упал: RuntimeError"
+    ]
 
 
 # --- CLI ------------------------------------------------------------------

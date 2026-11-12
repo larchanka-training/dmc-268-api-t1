@@ -186,7 +186,7 @@ sandbox-outline-demo: ## tree-sitter: поставить зависимости 
 	@printf '\n\033[1m==> 1/2 Зависимости Python (uv sync)\033[0m\n'
 	@uv sync --all-extras
 	@printf '\n\033[1m==> 2/2 Разбор мок-PR $(OUTLINE_CASE)\033[0m\n'
-	@uv run python -m tests.sandbox.outline --rules $(RULES) --case-file '$(OUTLINE_CASE)' $(ARGS); status=$$?; echo; \
+	@uv run python -m tests.sandbox.outline --rules $(RULES) --case-file '$(OUTLINE_CASE)' --full-outline $(ARGS); status=$$?; echo; \
 	case $$status in \
 		0) printf '\033[32mГотово: контекст собран, отчёт выше.\033[0m\n' ;; \
 		1) printf '\033[31mЕсть проблемы разбора (parse_error, файл не загружен или дифф не получен) - см. «проблемы» в отчёте.\033[0m\n' ;; \
