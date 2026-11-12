@@ -538,7 +538,9 @@ def test_main_demo_full_outline_has_definitions_for_every_language(capsys) -> No
     assert main(["--full-outline"]) == 0
 
     out = capsys.readouterr().out
-    assert "весь контур: определений" in out
+    # Семь файлов с грамматикой: три .py, .ts, .tsx, .js и .go; у docs/orders.md
+    # контура нет. Язык, выпавший из `_full_outline`, уменьшит счёт.
+    assert out.count("весь контур: определений") == 7
     assert "предупреждение: пустой контур" not in out
     assert "весь контур: определений 0," not in out
 
