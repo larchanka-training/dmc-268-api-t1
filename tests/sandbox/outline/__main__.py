@@ -7,8 +7,8 @@
 корпуса (`--case`), YAML-кейсы с ключом `lines:` (`--case-file`), диапазоны
 git (`--from-git`) и отдельные файлы (`--file` + `--lines`); без входов -
 `examples/outline-case.yaml`. Код выхода: 0 - всё разобрано; 1 - дифф PR не
-получен или в видимом `omitted` есть `parse_error`, `missing`, `unavailable`;
-2 - вход или настройки не подходят (отчёт не напечатан) либо не удалось
+получен, в видимом `omitted` есть `parse_error`, `missing`, `unavailable` или
+упал разбор `--full-outline`; 2 - вход или настройки не подходят (отчёт не напечатан) либо не удалось
 записать `--json` (уже после отчёта).
 """
 
@@ -189,7 +189,7 @@ def _print_file(file: FileOutlineReport, *, truncated: bool) -> None:
     if not file.ast and not any(e["part"] in _AST_PARTS for e in file.omitted):
         print(
             "  AST в пакете нет; причина могла не войти в урезанный omitted"
-            if truncated
+            if truncated and file.language is not None
             else "  AST не выбирался"
         )
     if file.outline is not None and file.outline.error is not None:

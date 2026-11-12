@@ -18,7 +18,7 @@ from app.infrastructure.parsing.tree_sitter_extractor import (
 from ...fakes.github_api import file_diff
 from ..inputs import InputError, PrInput, load_case_file
 from ..worker import SandboxConfig
-from .__main__ import _problems, main
+from .__main__ import _print_file, _problems, main
 from .runner import FullOutline, run_outline
 from .sources import (
     OutlinePr,
@@ -493,6 +493,54 @@ def test_problems_flag_full_outline_failure_missing_from_truncated_omitted(monke
     assert _problems(dataclasses.replace(outline, omitted=())) == [
         "m.py: разбор упал: RuntimeError"
     ]
+
+
+_NOT_CHOSEN = "AST не выбирался"
+_MAYBE_TRUNCATED = "причина могла не войти в урезанный omitted"
+_AST_ITEM = {"path": "a.py", "scopes": "def f()"}
+_SCOPES_BUDGET = {"path": "a.py", "part": "scopes", "reason": "budget"}
+
+
+@pytest.mark.parametrize(
+    ("path", "ast", "omitted", "truncated", "expected"),
+    [
+        ("a.py", (_AST_ITEM,), (), True, None),
+        ("a.py", (), (_SCOPES_BUDGET,), True, None),
+        ("a.py", (), (), False, _NOT_CHOSEN),
+        ("a.py", (), (), True, _MAYBE_TRUNCATED),
+        ("README.md", (), (), True, _NOT_CHOSEN),
+    ],
+    ids=["ast-shown", "ast-omitted", "not-chosen", "truncated", "truncated-no-grammar"],
+)
+def test_print_file_explains_missing_ast(
+    capsys,
+    path: str,
+    ast: tuple[dict[str, str], ...],
+    omitted: tuple[dict[str, str], ...],
+    truncated: bool,
+    expected: str | None,
+) -> None:
+    """Почему у файла нет AST: не выбирался или причина урезана бюджетом;
+    у файла без грамматики AST не бывает - про урезанный `omitted` не пишем."""
+    [outline] = run_outline([_pr("p", {}, {path: "x = 1\n"})], SandboxConfig())
+    [file] = outline.files
+
+    _print_file(dataclasses.replace(file, ast=ast, omitted=omitted), truncated=truncated)
+
+    out = capsys.readouterr().out
+    shown = [line for line in (_NOT_CHOSEN, _MAYBE_TRUNCATED) if line in out]
+    assert shown == ([expected] if expected else [])
+
+
+def test_main_demo_full_outline_has_definitions_for_every_language(capsys) -> None:
+    """Демо (`make sandbox-outline-demo`): у каждого файла мок-PR непустой контур -
+    сломанный запрос грамматики TS/TSX/JS/Go дал бы предупреждение."""
+    assert main(["--full-outline"]) == 0
+
+    out = capsys.readouterr().out
+    assert "весь контур: определений" in out
+    assert "предупреждение: пустой контур" not in out
+    assert "весь контур: определений 0," not in out
 
 
 # --- CLI ------------------------------------------------------------------
