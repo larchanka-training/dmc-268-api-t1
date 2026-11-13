@@ -587,7 +587,7 @@ def _added_files(diff: str) -> set[str]:
     """Пути файлов, которых до PR не было: `--- /dev/null`, затем `+++ b/<путь>`."""
     added: set[str] = set()
     previous = ""
-    for line in diff.splitlines():
+    for line in diff.split("\n"):
         if line.startswith("+++ ") and previous == "--- /dev/null":
             added.add(_header_path(line, "b/"))
         previous = line
@@ -603,7 +603,8 @@ def _commentable_lines(diff: str) -> set[tuple[str, str, int]]:
     lines: set[tuple[str, str, int]] = set()
     path = old_path = ""
     old = new = 0
-    for line in diff.splitlines():
+    # Только по `\n`, как git: `splitlines()` режет и по `\f`, U+2028 внутри строки.
+    for line in diff.split("\n"):
         if line.startswith("--- "):
             old_path = _header_path(line, "a/")
         elif line.startswith("+++ "):

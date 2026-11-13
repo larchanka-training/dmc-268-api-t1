@@ -62,16 +62,19 @@ NON_ASCII = {
     "confidence": None,
 }
 _CANDIDATE = re.compile(r"^### (F\d+)$", re.MULTILINE)
+# Заголовок файла в сообщении с кодом: `Файл "<путь>"`, путь - JSON-строка.
+_FILE = re.compile(r'^Файл ("(?:[^"\\]|\\.)*")', re.MULTILINE)
 
 
 class _GoldOracle:
     """Модель-оракул: на ревью - зафиксированный ответ кейса, на верификации - `keep`.
 
-    Кейс узнаётся по пути любого его файла в сообщении с кодом: у TC-14 первый
-    файл - переименование без hunk'ов, в промпт он не попадает. На `FAILING` ревью
-    бросает `LlmError`, на `BUG` добавляет к ответу `OFF_DIFF`, на `DROPPED`
-    верификатор отбрасывает кандидата. Сообщения
-    с кодом запросов ревью запоминаются - по ним видно, что дошло до промпта.
+    Кейс узнаётся по путям файлов в сообщении с кодом: в промпт попадают не все
+    файлы кейса (у TC-14 первый - переименование без hunk'ов), а один путь бывает
+    у нескольких кейсов (`app/api/users.py` - у TC-01 и TC-10). Поэтому берётся
+    кейс, у которого есть все пути из промпта, а из таких - с наименьшим числом
+    файлов. Сообщения с кодом запросов ревью запоминаются - по ним видно, что
+    дошло до промпта. Особое поведение на отдельных кейсах - в подклассе.
     """
 
     def __init__(self, cases: tuple[GoldCase, ...]) -> None:
@@ -80,28 +83,49 @@ class _GoldOracle:
 
     def complete[T: BaseModel](self, request: LlmRequest[T]) -> LlmResponse[T]:
         code = request.messages[2].content
-        (case,) = [
-            c for c in self._cases
-            if any(f"Файл {json.dumps(f.file_path)}" in code for f in c.files)
-        ]
+        case = self._case(code)
         if request.task is LlmTask.REVIEW:
             self.review_prompts[case.case_id] = code
-            if case.case_id == FAILING:
-                raise LlmError("модель недоступна")
-            content = request.response_model.model_validate(_answer(case))
+            content = request.response_model.model_validate(self._answer(case))
         else:
             verdicts = [
-                {
-                    "id": candidate,
-                    "verdict": "drop" if (case.case_id, candidate) == DROPPED else "keep",
-                    "reason": "оракул",
-                }
+                {"id": candidate, "verdict": self._verdict(case, candidate), "reason": "оракул"}
                 for candidate in _CANDIDATE.findall(request.messages[3].content)
             ]
             content = request.response_model.model_validate(
                 {"schemaVersion": "1", "verdicts": verdicts}
             )
         return LlmResponse(model="oracle", content=content)
+
+    def _case(self, code: str) -> GoldCase:
+        paths = {json.loads(p) for p in _FILE.findall(code)}
+        matching = [c for c in self._cases if paths <= {f.file_path for f in c.files}]
+        assert paths and matching, f"оракул не узнал кейс по путям {sorted(paths)}"
+        smallest = min(len(c.files) for c in matching)
+        (case,) = [c for c in matching if len(c.files) == smallest]
+        return case
+
+    def _answer(self, case: GoldCase) -> dict[str, Any]:
+        """Ответ на ревью: зафиксированный ответ кейса."""
+        answer: dict[str, Any] = json.loads(case.responses[0].text)
+        return answer
+
+    def _verdict(self, case: GoldCase, candidate: str) -> str:
+        return "keep"
+
+
+class _TrickyOracle(_GoldOracle):
+    """Оракул со сбоями: на `FAILING` ревью бросает `LlmError`, на `BUG` добавляет к
+    ответу `OFF_DIFF`, на `QUOTED_PATH` - `NON_ASCII`, на `DROPPED` верификатор
+    отбрасывает кандидата."""
+
+    def _answer(self, case: GoldCase) -> dict[str, Any]:
+        if case.case_id == FAILING:
+            raise LlmError("модель недоступна")
+        return _answer(case)
+
+    def _verdict(self, case: GoldCase, candidate: str) -> str:
+        return "drop" if (case.case_id, candidate) == DROPPED else "keep"
 
 
 def _answer(case: GoldCase) -> dict[str, Any]:
@@ -131,7 +155,7 @@ def test_run_gold_writes_an_artifact_the_offline_runner_loads(
 ) -> None:
     mini = tmp_path / "dataset"
     cases = _mini_dataset(mini)
-    oracle = _GoldOracle(cases)
+    oracle = _TrickyOracle(cases)
 
     runs = run_gold(stack, oracle, cases, 1, timeout=60)
     out = tmp_path / "artifact"
@@ -212,3 +236,17 @@ def test_run_gold_writes_an_artifact_the_offline_runner_loads(
         )
         assert code != EXIT_DATASET_ERROR, snapshot
         assert (report / "report.json").is_file()
+
+
+def test_oracle_passes_every_gold_case_through_the_stack(stack: Stack) -> None:
+    # Весь набор, включая adversarial, по одному разу: обвязка и фейк GitHub не теряют
+    # ни один кейс, а ответ модели доходит до pass1 без изменений.
+    cases = load_dataset(DATASET_DIR)
+    runs = run_gold(stack, _GoldOracle(cases), cases, 1, timeout=60)
+
+    assert [r.case_id for r in runs] == [c.case_id for c in cases]
+    failed = [(r.case_id, r.status, r.failure) for r in runs if r.status != "completed"]
+    assert not failed, failed
+    for run, case in zip(runs, cases, strict=True):
+        fixture = ReviewOutput.model_validate_json(case.responses[0].text)
+        assert ReviewOutput.model_validate_json(run.pass1) == fixture, case.case_id

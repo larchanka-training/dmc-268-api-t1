@@ -201,3 +201,29 @@ def test_quoted_non_ascii_paths_are_decoded_like_github_does(github: FakeGitHub)
         REPO_FULL_NAME, NEW_GUIDE, HEAD, INSTALLATION_ID, max_bytes=MAX_BYTES
     )
     assert content == "новое\n"
+
+
+# `\f`, U+2028 и U+2029 внутри строки hunk'а - часть строки: git и GitHub делят дифф
+# только по `\n`. `splitlines()` резал бы по ним, и хвост с ` `/`+` в начале считался
+# бы ещё одной строкой hunk'а и сдвигал номера следующих.
+SEPARATORS_DIFF = """\
+diff --git a/app/sep.py b/app/sep.py
+index 1111111..2222222 100644
+--- a/app/sep.py
++++ b/app/sep.py
+@@ -1,3 +1,3 @@
+ a = 1\f x = 0
+-b = " +x"
++b = "  y"
+ c = 3
+"""
+
+
+def test_line_separators_inside_a_hunk_line_do_not_shift_numbers(github: FakeGitHub) -> None:
+    github.open_pull_from_diff(7, base_sha=BASE, head_sha=HEAD, diff=SEPARATORS_DIFF)
+
+    assert _review(github, "app/sep.py", 2).status_code == 200
+    assert _review(github, "app/sep.py", 3).status_code == 200
+    assert _review(github, "app/sep.py", 3, side="LEFT").status_code == 200
+    assert _review(github, "app/sep.py", 4).status_code == 422
+    assert _review(github, "app/sep.py", 4, side="LEFT").status_code == 422
