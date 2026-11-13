@@ -224,6 +224,35 @@ class FakeGitHub:
             self.pulls[number] = pull
         return pull
 
+    def open_pull_from_diff(
+        self,
+        number: int,
+        *,
+        base_sha: str,
+        head_sha: str,
+        diff: str,
+        head_files: Mapping[str, str] | None = None,
+        **details: Any,
+    ) -> PullRequest:
+        """PR с готовым диффом: текст отдаётся как есть, номера строк hunk'ов не сдвигаются.
+
+        Так гоняется золотой набор eval, где у кейса есть только `diff.patch`.
+        `head_files` - содержимое на head, и только для добавленных файлов
+        (`--- /dev/null`): изменённый файл из hunk'ов не восстановить, его
+        `contents` отвечает 404. `details` - поля `PullRequest` (`title`,
+        `body`, `head_ref`, `base_ref`, ...).
+        """
+        files = dict(head_files or {})
+        not_added = sorted(set(files) - _added_files(diff))
+        if not_added:
+            raise ValueError(f"содержимое на head - только у добавленных файлов: {not_added}")
+        pull = PullRequest(number, base_sha, head_sha, diff, **details)
+        with self._lock:
+            for path, content in files.items():
+                self.files[(path, head_sha)] = content
+            self.pulls[number] = pull
+        return pull
+
     def add_foreign_review(self, number: int, body: str, *, login: str, user_type: str) -> Review:
         """Ревью не от нашего App: человек или чужой бот, тело - любое."""
         review = Review(
@@ -528,6 +557,43 @@ class FakeGitHub:
 _HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
+# Escape C-quoting git (`quote_c_style`): кроме восьмеричных байтов.
+_C_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+_C_ESCAPE = re.compile(rb'\\([0-7]{3}|[abtnvfr"\\])')
+
+
+def _header_path(line: str, prefix: str) -> str:
+    """Путь из строки `--- `/`+++ ` без префикса стороны.
+
+    Путь с не-ASCII байтами или спецсимволами git пишет в кавычках с escape
+    (`"b/docs/\\321\\200....md"`, при `core.quotePath`), а GitHub принимает
+    комментарий по настоящему пути - его фейк и восстанавливает. Свой разбор,
+    как и `_commentable_lines`: без кода сервиса.
+    """
+    # У имени с пробелом git дописывает таб в конец строки - и после кавычки.
+    path = line[4:].removesuffix("\t")
+    if len(path) > 1 and path.startswith('"') and path.endswith('"'):
+        raw = _C_ESCAPE.sub(
+            lambda m: bytes(
+                [int(m[1], 8) if len(m[1]) == 3 else _C_ESCAPES[m[1].decode()]]
+            ),
+            path[1:-1].encode(),
+        )
+        path = raw.decode()
+    return path.removeprefix(prefix)
+
+
+def _added_files(diff: str) -> set[str]:
+    """Пути файлов, которых до PR не было: `--- /dev/null`, затем `+++ b/<путь>`."""
+    added: set[str] = set()
+    previous = ""
+    for line in diff.splitlines():
+        if line.startswith("+++ ") and previous == "--- /dev/null":
+            added.add(_header_path(line, "b/"))
+        previous = line
+    return added
+
+
 def _commentable_lines(diff: str) -> set[tuple[str, str, int]]:
     """Строки, к которым GitHub принимает inline-комментарий: (путь, сторона, номер).
 
@@ -539,10 +605,10 @@ def _commentable_lines(diff: str) -> set[tuple[str, str, int]]:
     old = new = 0
     for line in diff.splitlines():
         if line.startswith("--- "):
-            old_path = line[4:].removeprefix("a/")
+            old_path = _header_path(line, "a/")
         elif line.startswith("+++ "):
             # Удалённый файл: `+++ /dev/null`, комментарий к нему - по старому пути.
-            path = old_path if line[4:] == "/dev/null" else line[4:].removeprefix("b/")
+            path = old_path if line[4:] == "/dev/null" else _header_path(line, "b/")
         elif line.startswith("diff --git"):
             continue
         elif m := _HUNK.match(line):

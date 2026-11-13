@@ -1,24 +1,38 @@
 name: LLM eval
 
-# Eval правил ревью на живой модели (change add-rules-e2e-benchmark-and-load,
-# design D5): корпус PR из tests/eval/rules/ проходит сквозной стенд в
-# конфигурациях `.review/rules.md` absent, rules, empty, adversarial, отчёт с
-# Precision/Recall - артефакт прогона и сводка job. Каждый прогон - платные
-# вызовы EUrouter, поэтому запуск вручную. На PR - только по метке `eval`, с
-# одним повтором: изменённый корпус надо измерить до мерджа, а фильтр `paths`
+# Два набора на живой модели, выбор - input `suite` (rules, gold, all; по
+# умолчанию rules). Каждый прогон - платные вызовы EUrouter, поэтому запуск
+# вручную. Запросы синтетические: код проверяемых репозиториев наружу не уходит.
+#
+# rules - eval правил ревью (change add-rules-e2e-benchmark-and-load, design
+# D5): корпус PR из tests/eval/rules/ проходит сквозной стенд в конфигурациях
+# `.review/rules.md` absent, rules, empty, adversarial, отчёт с Precision/Recall -
+# артефакт прогона и сводка job. На PR - только по метке `eval`, с одним
+# повтором: изменённый корпус надо измерить до мерджа, а фильтр `paths`
 # сравнивает весь дифф PR, и eval шёл бы на каждый пуш PR, хоть раз задевшего
-# корпус. Снять и снова поставить метку - новый прогон. Полный
-# прогон с тремя повторами - вручную. PR из форка пропускаем: секрета в нём нет.
-# Запросы синтетические: код проверяемых репозиториев наружу не уходит.
+# корпус. Снять и снова поставить метку - новый прогон. Полный прогон с тремя
+# повторами - вручную. PR из форка пропускаем: секрета в нём нет.
+#
+# gold - живой бенчмарк золотого датасета (change add-live-gold-benchmark, design
+# D7): 35 кейсов через сквозной стенд, ответы до и после второго прохода, отчёт
+# BENCHMARK_REPORT.md (make benchmark-report). Только вручную: метка `eval` его не
+# запускает. Пороги LLM_EVAL §6 здесь - измерение, job по ним не падает; падает,
+# только если прогон кейса не дошёл до `completed`.
 on:
   workflow_dispatch:
     inputs:
+      suite:
+        description: Набор - rules (правила владельца), gold (золотой датасет) или all
+        type: choice
+        options: [rules, gold, all]
+        default: rules
+        required: true
       repetitions:
         description: Повторов каждого кейса (разброс метрик между повторами - в отчёте)
         default: "3"
         required: true
       configs:
-        description: Конфигурации правил через запятую
+        description: Конфигурации правил через запятую (только для rules)
         default: absent,rules,empty,adversarial
         required: true
   pull_request:
@@ -37,7 +51,7 @@ jobs:
     # У PR из форка нет секретов: прогон без них закончился бы провалом «eval пропущен».
     # Метка `eval` - явное согласие на платный прогон.
     if: >-
-      github.event_name != 'pull_request' ||
+      (github.event_name != 'pull_request' && inputs.suite != 'gold') ||
       (github.event.label.name == 'eval' && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     # 8 кейсов × 4 конфигурации × до 2 вызовов модели на повтор; один повтор - около 3 мин.
@@ -91,10 +105,79 @@ jobs:
           # Пропуск роняет прогон (tests/strict_skips.py): обычно нет секрета
           # AI_DMC268_T1, переменной AI_DMC268_URL или сервисов.
           PYTEST_FAIL_ON_SKIP: "1"
-        run: uv run pytest -q -rs -s -m eval tests/eval
+        # Только корпус правил: tests/eval целиком захватил бы и платный золотой набор.
+        run: uv run pytest -q -rs -s -m eval tests/eval/rules
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: rules-eval-report
           path: eval-report/
+          if-no-files-found: warn
+
+  gold:
+    # Только вручную: метка PR и обязательный CI живую модель на золотом наборе не вызывают.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.suite == 'gold' || inputs.suite == 'all')
+    runs-on: ubuntu-latest
+    # 35 кейсов × 3 повтора × до 2 вызовов модели; пробный прогон - repetitions=1.
+    timeout-minutes: 180
+    services:
+      postgres:
+        image: postgres:18-alpine@sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5
+        env:
+          POSTGRES_USER: dmc268
+          POSTGRES_PASSWORD: dmc268
+          POSTGRES_DB: dmc268
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U dmc268 -d dmc268"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      rabbitmq:
+        image: rabbitmq:4.4-alpine@sha256:5b70d54d53d0ce9558b84ad93cb237d06fa2e8c57115fa0ff7223b9eaffa44ed
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://dmc268:dmc268@localhost:5432/dmc268
+      TEST_RABBITMQ_URL: amqp://guest:guest@localhost:5672/%2F
+      EUROROUTER_API_KEYS: ${{ secrets.AI_DMC268_T1 }}
+      EUROROUTER_BASE_URL: ${{ vars.AI_DMC268_URL }}
+      EVAL_REPETITIONS: ${{ inputs.repetitions }}
+      EVAL_REPORT_DIR: eval-live-gold
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Та же модель и effort, что у rules и llm-live.yml: метрики сравнимы только при одной модели.
+      - run: echo "EUROROUTER_MODEL=$(cat .github/eurorouter-model)" >> "$GITHUB_ENV"
+      - run: echo "EUROROUTER_REASONING_EFFORT=$(cat .github/eurorouter-reasoning-effort)" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/python-env
+      - name: pytest -m eval золотого набора (пропуск теста - провал)
+        env:
+          PYTEST_FAIL_ON_SKIP: "1"
+        run: uv run pytest -q -rs -s -m eval tests/eval/test_live_gold.py
+      # Отчёт - и при упавшем pytest: сбой кейса пишется в артефакт, оплаченные ответы
+      # не теряются. Генератор по порогам не падает - они измерение.
+      - name: Отчёт бенчмарка
+        id: report
+        if: always()
+        run: make benchmark-report EVAL_LIVE_DIR=eval-live-gold
+      - name: Сводка job
+        if: always() && steps.report.outcome == 'success'
+        run: cat BENCHMARK_REPORT.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: gold-eval-report
+          path: |
+            eval-live-gold/
+            BENCHMARK_REPORT.md
           if-no-files-found: warn

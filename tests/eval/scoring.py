@@ -28,10 +28,12 @@
 и поведение то же, что у корпуса правил.
 """
 
-from collections.abc import Iterable, Sequence
+import hashlib
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from statistics import mean, pstdev
+from typing import Protocol
 from uuid import UUID
 
 from app.domain.dedup import deduplicate
@@ -412,3 +414,46 @@ def classify_calls(steps: Sequence[ReviewRunStep]) -> OutputCounts:
         else:
             counts += OutputCounts(no_answer=1)
     return counts
+
+
+# --- обвязка прогонов на стенде ----------------------------------------------
+# Общее у прогонов корпуса правил (`rules/runner.py`) и золотого набора (`live.py`).
+
+# Текст сбоя идёт в отчёт: первая строка, не длиннее этого.
+FAILURE_LIMIT = 300
+
+
+def failure_text(error: BaseException) -> str:
+    """Сбой прогона для отчёта: тип и первая строка текста, не длиннее `FAILURE_LIMIT`."""
+    lines = f"{type(error).__name__}: {error}".splitlines()
+    return (lines[0] if lines else type(error).__name__)[:FAILURE_LIMIT]
+
+
+def pull_sha(*parts: object) -> str:
+    """Детерминированный SHA коммита PR на стенде из частей его имени."""
+    return hashlib.sha1("/".join(map(str, parts)).encode()).hexdigest()
+
+
+def calls_of(read_steps: Callable[[], Sequence[ReviewRunStep]] | None) -> OutputCounts:
+    """Исходы вызовов модели упавшего прогона; прогона нет или шаги не читаются - нули."""
+    if read_steps is None:
+        return OutputCounts()
+    try:
+        return classify_calls(read_steps())
+    except Exception:  # noqa: BLE001 - сбой чтения не должен заслонить сбой прогона
+        return OutputCounts()
+
+
+class _WithComments(Protocol):
+    @property
+    def comments(self) -> Sequence[object]: ...
+
+
+def check_published(reviews: Iterable[_WithComments], findings: int, where: str) -> None:
+    """Каждое замечание прогона дошло до PR inline-комментарием.
+
+    Замечание без комментария пользователь не увидел бы: это сбой стенда, а не
+    измерение модели, - прогон пишется в отчёт как `error`.
+    """
+    published = sum(len(r.comments) for r in reviews)
+    assert published == findings, f"{where}: в базе {findings}, в PR {published}"
