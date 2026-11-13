@@ -27,6 +27,7 @@ import statistics
 import sys
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -41,10 +42,12 @@ from .gold_report import cell, num, to_json, to_markdown, write_reports
 from .runner import (
     EXIT_DATASET_ERROR,
     EXIT_OK,
+    MIN_VALID_OUTPUT_RATE,
     Evaluation,
     Gate,
     ResponseResult,
     Summary,
+    _at_least,
     evaluate_dataset,
 )
 from .scoring import OutputCounts, match
@@ -197,7 +200,7 @@ def _status(gate: Gate) -> str:
     return "пройден" if gate.passed else "**не пройден**"
 
 
-def _gates(passes: Sequence[Evaluation]) -> list[str]:
+def _gates(passes: Sequence[Evaluation], calls: OutputCounts) -> list[str]:
     lines = [
         "## Пороги LLM_EVAL §6",
         "",
@@ -209,7 +212,15 @@ def _gates(passes: Sequence[Evaluation]) -> list[str]:
         "| Гейт | Порог | pass1 | Статус pass1 | pass2 | Статус pass2 | Примечание |",
         "|---|---|---|---|---|---|---|",
     ]
+    # Файлы прохода хранят ReviewOutput уже после повтора адаптера, а Valid-output rate по
+    # LLM_EVAL - доля вызовов модели, валидных с первой попытки: она из timings.json.
+    valid = replace(
+        _at_least("Valid-output rate", calls.valid_rate, MIN_VALID_OUTPUT_RATE),
+        note="по вызовам модели с первой попытки (timings.json)",
+    )
     for g1, g2 in zip(passes[0].gates, passes[1].gates, strict=True):
+        if g1.metric == valid.metric:
+            g1 = g2 = valid
         if g1.note == g2.note:
             note = g1.note
         else:
@@ -571,7 +582,7 @@ def render(
         ],
         _configuration(meta),
         _metrics(passes, calls),
-        _gates(passes),
+        _gates(passes, calls),
         _categories(passes),
         _injection(passes),
         _f1_spread(passes),

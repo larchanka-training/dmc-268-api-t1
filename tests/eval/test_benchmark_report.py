@@ -215,6 +215,16 @@ def test_thresholds_below_limit_are_reported_but_exit_code_is_zero(
     assert "| Precision | ≥ 0.75 | 0.67 | **не пройден** | 1.00 | пройден |" in gates
 
 
+def test_valid_output_gate_counts_model_calls_on_first_attempt(tmp_path: Path) -> None:
+    # Файлы прохода хранят ReviewOutput уже после повтора адаптера; гейт LLM_EVAL - доля
+    # вызовов, валидных с первой попытки, она в timings.json (10 из 11).
+    _, text, _ = _generate(tmp_path)
+
+    row = _row(_section(text, "Пороги LLM_EVAL §6"), "Valid-output rate")
+    assert row[2:6] == ["0.91", "**не пройден**", "0.91", "**не пройден**"]
+    assert row[6] == "по вызовам модели с первой попытки (timings.json)"
+
+
 def test_review_time_statistics_come_from_timings(tmp_path: Path) -> None:
     _, text, _ = _generate(tmp_path)
 
