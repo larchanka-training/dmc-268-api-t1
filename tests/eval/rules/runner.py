@@ -10,7 +10,6 @@
 корпус идёт дальше - оплаченные ответы модели не теряются, отчёт выходит.
 """
 
-import hashlib
 from collections.abc import Sequence
 from contextlib import suppress
 
@@ -23,12 +22,16 @@ from app.domain.repo_rules import RULES_PATH
 
 from ...e2e.stack import Stack, deliver
 from ..report import RunResult
-from ..scoring import OutputCounts, Reported, classify_calls, score_case
+from ..scoring import (
+    Reported,
+    calls_of,
+    check_published,
+    classify_calls,
+    failure_text,
+    pull_sha,
+    score_case,
+)
 from .corpus import CONFIGS, Case
-
-
-def _sha(*parts: object) -> str:
-    return hashlib.sha1("/".join(map(str, parts)).encode()).hexdigest()
 
 
 def _reported(finding: Finding) -> Reported:
@@ -59,7 +62,7 @@ def run_corpus(
     for config in configs:
         rules_text = CONFIGS[config]
         base_files = {} if rules_text is None else {RULES_PATH: rules_text}
-        base_sha = _sha("base", config)
+        base_sha = pull_sha("base", config)
         for case in cases:
             for repetition in range(1, repetitions + 1):
                 number += 1
@@ -68,7 +71,7 @@ def run_corpus(
                     pull = stack.github.open_pull(
                         number,
                         base_sha=base_sha,
-                        head_sha=_sha("head", config, case.id, repetition),
+                        head_sha=pull_sha("head", config, case.id, repetition),
                         base_files=base_files,
                         head_files=dict(case.files),
                         title=case.pr_title,
@@ -91,10 +94,6 @@ def run_corpus(
     return results
 
 
-# Текст сбоя идёт в Markdown-отчёт: первая строка, не длиннее этого.
-_FAILURE_LIMIT = 300
-
-
 def _failed(
     stack: Stack,
     config: str,
@@ -104,14 +103,10 @@ def _failed(
     error: Exception,
 ) -> RunResult:
     """Прогон, упавший в обвязке (не 202, таймаут воркера, расхождение с PR), - в отчёт."""
-    lines = f"{type(error).__name__}: {error}".splitlines()
-    failure = (lines[0] if lines else type(error).__name__)[:_FAILURE_LIMIT]
-    outputs = OutputCounts()
-    if run_id is not None:
-        # Исходы вызовов модели сохраняем, если шаги читаются; не читаются - остаются нулями.
-        with suppress(Exception):
-            outputs = classify_calls(stack.steps(run_id))
-    return RunResult(config, case.id, repetition, "error", failure, (), None, outputs)
+    outputs = calls_of(None if run_id is None else lambda: stack.steps(run_id))
+    return RunResult(
+        config, case.id, repetition, "error", failure_text(error), (), None, outputs
+    )
 
 
 def _result(
@@ -124,11 +119,7 @@ def _result(
             config, case.id, repetition, run.status.value, run.failure_reason, (), None, outputs
         )
     reported = tuple(_reported(f) for f in stack.findings(run_id))
-    published = sum(len(r.comments) for r in stack.github.reviews_of(number))
-    # Замечание без inline-комментария в PR пользователь не увидел бы: это сбой стенда.
-    assert published == len(reported), (
-        f"{case.id}/{config}: в базе {len(reported)}, в PR {published}"
-    )
+    check_published(stack.github.reviews_of(number), len(reported), f"{case.id}/{config}")
     return RunResult(
         config,
         case.id,

@@ -5,6 +5,7 @@
 """
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -308,6 +309,51 @@ def test_dataset_out_of_contract_exits_with_its_own_code(
 
     assert code == EXIT_DATASET_ERROR
     assert "TC-01-sql: находка sql-injection" in capsys.readouterr().err
+
+
+
+def _copy_responses(dataset: Path, target: Path) -> None:
+    """Зафиксированные ответы датасета, разложенные как живой артефакт: `<case_id>/run-<n>.json`."""
+    for folder in dataset.rglob("responses"):
+        shutil.copytree(folder, target / folder.parent.name)
+
+
+def test_external_copy_of_the_fixtures_gives_the_same_report_plus_its_hash(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _copy_responses(DATASET_DIR, tmp_path / "live")
+
+    plain = main(["--report-dir", str(tmp_path / "plain")])
+    plain_out = capsys.readouterr().out
+    live = main(["--responses", str(tmp_path / "live"), "--report-dir", str(tmp_path / "out")])
+
+    assert (plain, live) == (EXIT_OK, EXIT_OK), capsys.readouterr().err
+    before = json.loads((tmp_path / "plain" / "report.json").read_text())
+    after = json.loads((tmp_path / "out" / "report.json").read_text())
+    assert "responses_sha256" not in before["meta"]
+    digest = after["meta"].pop("responses_sha256")
+    assert len(digest) == 64
+    assert after == before
+    # Markdown отличается одной строкой: источник ответов и его хэш вместо фикстур.
+    fixed = "Зафиксированные ответы модели, без вызова модели. Итог: "
+    external = f"Ответы: внешний каталог, хэш `{digest[:12]}`. Итог: "
+    assert fixed in plain_out
+    expected_md = plain_out.replace(fixed, external)
+    assert expected_md != plain_out
+    assert (tmp_path / "out" / "report.md").read_text() == expected_md
+
+
+def test_case_missing_from_the_external_responses_exits_with_the_dataset_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _clean_dataset(tmp_path / "ds")
+    _copy_responses(tmp_path / "ds", tmp_path / "live")
+    shutil.rmtree(tmp_path / "live" / "TC-09-negative")
+
+    code = main(["--dataset", str(tmp_path / "ds"), "--responses", str(tmp_path / "live")])
+
+    assert code == EXIT_DATASET_ERROR
+    assert "TC-09-negative: нет каталога ответов" in capsys.readouterr().err
 
 
 # Снимок сопоставления на настоящем датасете: (TP, TP must_find, FP, FN) по кейсам.

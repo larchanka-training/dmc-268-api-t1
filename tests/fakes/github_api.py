@@ -224,6 +224,35 @@ class FakeGitHub:
             self.pulls[number] = pull
         return pull
 
+    def open_pull_from_diff(
+        self,
+        number: int,
+        *,
+        base_sha: str,
+        head_sha: str,
+        diff: str,
+        head_files: Mapping[str, str] | None = None,
+        **details: Any,
+    ) -> PullRequest:
+        """PR с готовым диффом: текст отдаётся как есть, номера строк hunk'ов не сдвигаются.
+
+        Так гоняется золотой набор eval, где у кейса есть только `diff.patch`.
+        `head_files` - содержимое на head, и только для добавленных файлов
+        (`--- /dev/null`): изменённый файл из hunk'ов не восстановить, его
+        `contents` отвечает 404. `details` - поля `PullRequest` (`title`,
+        `body`, `head_ref`, `base_ref`, ...).
+        """
+        files = dict(head_files or {})
+        not_added = sorted(set(files) - _added_files(diff))
+        if not_added:
+            raise ValueError(f"содержимое на head - только у добавленных файлов: {not_added}")
+        pull = PullRequest(number, base_sha, head_sha, diff, **details)
+        with self._lock:
+            for path, content in files.items():
+                self.files[(path, head_sha)] = content
+            self.pulls[number] = pull
+        return pull
+
     def add_foreign_review(self, number: int, body: str, *, login: str, user_type: str) -> Review:
         """Ревью не от нашего App: человек или чужой бот, тело - любое."""
         review = Review(
@@ -526,6 +555,17 @@ class FakeGitHub:
 
 
 _HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def _added_files(diff: str) -> set[str]:
+    """Пути файлов, которых до PR не было: `--- /dev/null`, затем `+++ b/<путь>`."""
+    added: set[str] = set()
+    previous = ""
+    for line in diff.splitlines():
+        if line.startswith("+++ ") and previous == "--- /dev/null":
+            added.add(line[4:].removeprefix("b/"))
+        previous = line
+    return added
 
 
 def _commentable_lines(diff: str) -> set[tuple[str, str, int]]:
