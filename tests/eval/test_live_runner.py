@@ -35,7 +35,9 @@ FAILING = "TC-02-hardcoded-secret"
 NEGATIVE = "TC-09-cosmetic-refactor"
 OLD_SIDE = "TC-25-removed-owner-check"
 INJECTED = "ADV-08-pr-description-instruction"
-SELECTED = (BUG, FAILING, NEGATIVE, OLD_SIDE, f"adversarial/{INJECTED}")
+# Путь `docs/руководство.md` git пишет в кавычках с восьмеричными escape.
+QUOTED_PATH = "TC-14-binary-rename-non-utf8"
+SELECTED = (BUG, FAILING, NEGATIVE, OLD_SIDE, QUOTED_PATH, f"adversarial/{INJECTED}")
 # Верификатор отбрасывает второе замечание TC-25 (correctness на той же строке).
 DROPPED = (OLD_SIDE, "F2")
 # На BUG оракул добавляет к ответу замечание вне диффа: `screen_findings` его отсеивает.
@@ -48,13 +50,25 @@ OFF_DIFF = {
     "message": "Строки 900 в диффе нет.",
     "confidence": None,
 }
+# На QUOTED_PATH оракул добавляет замечание к файлу с кириллицей в имени: GitHub его
+# принимает, значит, и публикация ревью не должна падать.
+NON_ASCII = {
+    "filePath": "docs/руководство.md",
+    "side": "new",
+    "line": 9,
+    "category": "readability",
+    "severity": "low",
+    "message": "В строке нет пробела после запятой.",
+    "confidence": None,
+}
 _CANDIDATE = re.compile(r"^### (F\d+)$", re.MULTILINE)
 
 
 class _GoldOracle:
     """Модель-оракул: на ревью - зафиксированный ответ кейса, на верификации - `keep`.
 
-    Кейс узнаётся по пути первого файла в сообщении с кодом. На `FAILING` ревью
+    Кейс узнаётся по пути любого его файла в сообщении с кодом: у TC-14 первый
+    файл - переименование без hunk'ов, в промпт он не попадает. На `FAILING` ревью
     бросает `LlmError`, на `BUG` добавляет к ответу `OFF_DIFF`, на `DROPPED`
     верификатор отбрасывает кандидата. Сообщения
     с кодом запросов ревью запоминаются - по ним видно, что дошло до промпта.
@@ -66,7 +80,10 @@ class _GoldOracle:
 
     def complete[T: BaseModel](self, request: LlmRequest[T]) -> LlmResponse[T]:
         code = request.messages[2].content
-        (case,) = [c for c in self._cases if f"Файл {json.dumps(c.files[0].file_path)}" in code]
+        (case,) = [
+            c for c in self._cases
+            if any(f"Файл {json.dumps(f.file_path)}" in code for f in c.files)
+        ]
         if request.task is LlmTask.REVIEW:
             self.review_prompts[case.case_id] = code
             if case.case_id == FAILING:
@@ -88,10 +105,12 @@ class _GoldOracle:
 
 
 def _answer(case: GoldCase) -> dict[str, Any]:
-    """Ответ оракула на ревью кейса: фикстура, у `BUG` - ещё и `OFF_DIFF`."""
+    """Ответ оракула на ревью кейса: фикстура, у `BUG` - ещё и `OFF_DIFF`, у `QUOTED_PATH` - `NON_ASCII`."""
     answer: dict[str, Any] = json.loads(case.responses[0].text)
     if case.case_id == BUG:
         answer["findings"].append(OFF_DIFF)
+    if case.case_id == QUOTED_PATH:
+        answer["findings"].append(NON_ASCII)
     return answer
 
 
@@ -125,15 +144,25 @@ def test_run_gold_writes_an_artifact_the_offline_runner_loads(
         FAILING: "failed",
         NEGATIVE: "completed",
         OLD_SIDE: "completed",
+        QUOTED_PATH: "completed",
         INJECTED: "completed",
     }, [(r.case_id, r.failure) for r in runs]
+
+    # Комментарий к файлу с кириллицей в имени опубликован по настоящему пути.
+    published = {
+        (c.path, c.line)
+        for number in stack.github.pulls
+        for review in stack.github.reviews_of(number)
+        for c in review.comments
+    }
+    assert ("docs/руководство.md", 9) in published
 
     # Описание PR из mr.json дошло до промпта ревью: injection в нём проверяется на деле.
     assert "ADV-08-OBEYED-8e41" in oracle.review_prompts[INJECTED]
     assert "Описание PR" in oracle.review_prompts[INJECTED]
 
     by_case = {c.case_id: c for c in cases}
-    for case_id in (BUG, NEGATIVE, OLD_SIDE, INJECTED):
+    for case_id in (BUG, NEGATIVE, OLD_SIDE, QUOTED_PATH, INJECTED):
         fixture = ReviewOutput.model_validate_json(by_case[case_id].responses[0].text)
         answer = ReviewOutput.model_validate(_answer(by_case[case_id]))
         pass1 = ReviewOutput.model_validate_json((out / "pass1" / case_id / "run-1.json").read_text())
@@ -142,6 +171,8 @@ def test_run_gold_writes_an_artifact_the_offline_runner_loads(
         assert pass1 == answer, case_id
         # pass2 - без отсеянного (`OFF_DIFF` у BUG) и без отброшенного верификатором (F2 TC-25).
         kept = fixture.findings[:1] if case_id == OLD_SIDE else fixture.findings
+        if case_id == QUOTED_PATH:
+            kept = answer.findings
         assert _sorted(pass2) == _sorted(fixture.model_copy(update={"findings": kept})), case_id
 
     # Упавший кейс - заглушка, не проходящая схему, и статус с причиной.
@@ -164,8 +195,9 @@ def test_run_gold_writes_an_artifact_the_offline_runner_loads(
     assert timings[OLD_SIDE]["outputs"] == {
         "first_try": 2, "after_retry": 0, "invalid": 0, "no_answer": 0
     }
-    assert {c: timings[c]["rejected_findings"] for c in (BUG, NEGATIVE, OLD_SIDE, INJECTED)} == {
-        BUG: 1, NEGATIVE: 0, OLD_SIDE: 0, INJECTED: 0
+    cases_with_answer = (BUG, NEGATIVE, OLD_SIDE, QUOTED_PATH, INJECTED)
+    assert {c: timings[c]["rejected_findings"] for c in cases_with_answer} == {
+        BUG: 1, NEGATIVE: 0, OLD_SIDE: 0, QUOTED_PATH: 0, INJECTED: 0
     }
     assert timings[FAILING]["status"] == "failed"
     assert timings[FAILING]["failure"]

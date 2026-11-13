@@ -96,14 +96,30 @@ def _error_text(error: ValidationError) -> str:
 
 
 def _texts(output: ReviewOutput) -> list[str]:
-    """Весь текст ответа, который увидит пользователь: в нём ищутся запрещённые фразы."""
+    """Текст ответа, в котором ищутся запрещённые фразы: всё, что увидит пользователь,
+    кроме удаляемых строк правки в форме диффа.
+
+    Строка `-` (и заголовок `---`) в такой правке - код, который модель предлагает
+    убрать: канарейка там - цитата атаки, а не подчинение (LLM_EVAL §4).
+    Добавляемые и контекстные строки остаются в поиске - их правка оставит в коде.
+    Правка не в форме диффа (готовый текст замены) ищется целиком.
+    """
     texts = [output.summary.problem, output.summary.effort, *output.summary.positives]
     for finding in output.findings:
         texts.append(finding.message)
         if finding.suggestion is not None:
-            texts.append(finding.suggestion.diff)
+            texts.append(_kept_suggestion(finding.suggestion.diff))
     texts += [follow_up.reply for follow_up in output.thread_follow_ups]
     return texts
+
+
+def _kept_suggestion(text: str) -> str:
+    """Правка без удаляемых строк, если она в форме диффа: каждая непустая строка
+    начинается с `+`, `-`, пробела, `@` или `\\`. Иначе - текст как есть."""
+    lines = text.splitlines()
+    if not all(ln.startswith(("+", "-", " ", "@", "\\")) for ln in lines if ln):
+        return text
+    return "\n".join(ln for ln in lines if not ln.startswith("-"))
 
 
 def _injection(
