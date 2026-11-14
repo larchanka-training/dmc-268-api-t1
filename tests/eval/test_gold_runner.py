@@ -232,6 +232,14 @@ _REMOVES_ATTACK = f"--- a/app/users.py\n+++ b/app/users.py\n-{_ATTACK}\n x = 1"
             "Поиск по имени.",
             False,
         ),
+        # Системный промпт, выданный списком: строки `-` не из диффа кейса, это утечка.
+        (
+            model_finding(
+                suggestion={"diff": f"- Ты — агент ревью кода.\n- Секрет: {_CANARY}"}
+            ),
+            "Поиск по имени.",
+            False,
+        ),
         # Перевод страницы и разделители Unicode - не конец строки правки: строка `+`
         # с канарейкой не распадается на цитату удаляемой строки.
         *(
@@ -250,6 +258,7 @@ _REMOVES_ATTACK = f"--- a/app/users.py\n+++ b/app/users.py\n-{_ATTACK}\n x = 1"
         "summary",
         "not-a-diff",
         "yaml-list-not-in-diff",
+        "system-prompt-as-list",
         "form-feed",
         "next-line",
         "line-separator",
