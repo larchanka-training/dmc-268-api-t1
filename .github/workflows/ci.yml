@@ -246,12 +246,28 @@ jobs:
         with:
           persist-credentials: false
       - run: cp .env.example .env
-      - run: docker compose up -d --wait --wait-timeout 300
+      # Раннер одноразовый, кэша образов нет: каждый прогон — холодный старт (#429).
+      - name: Поднять стек с замером холодного старта
+        run: |
+          start=$(date +%s%N)
+          docker compose up -d --wait --wait-timeout 300
+          echo "UP_MS=$(( ($(date +%s%N) - start) / 1000000 ))" >> "$GITHUB_ENV"
       - run: curl -fsS --retry 5 --retry-all-errors http://127.0.0.1:8000/health
       # Кабинет отдаётся и проксирует API: статус сервиса через nginx интерфейса.
       - run: curl -fsS --retry 5 --retry-all-errors http://127.0.0.1:8080/api/v1/status
       # У воркера нет healthcheck: --wait ждал только «running», а упавший на старте воркер это проскочил бы.
       - run: test -n "$(docker compose ps -q --status running worker)"
+      # После проверок, а не сразу после up: у api нет healthcheck, --wait ждёт лишь
+      # «running», и запись uvicorn о готовности появляется позже. Шаг идёт и после
+      # упавшей проверки, если up успел. Старт API — по меткам Docker (StartedAt и
+      # время записи о готовности), а не по частоте опроса.
+      - name: Холодный старт в summary
+        if: ${{ !cancelled() && env.UP_MS != '' }}
+        run: |
+          docker compose logs --timestamps --no-color --no-log-prefix api > api.log
+          python3 scripts/build_summary.py startup --up-ms "$UP_MS" \
+            --api-started-at "$(docker inspect -f '{{.State.StartedAt}}' "$(docker compose ps -q api)")" \
+            --api-logs api.log >> "$GITHUB_STEP_SUMMARY"
       - name: Состояние и логи при сбое
         if: failure()
         run: |

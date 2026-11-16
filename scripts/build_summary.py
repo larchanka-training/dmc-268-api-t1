@@ -1,13 +1,16 @@
 """Summary job'а `image` в `$GITHUB_STEP_SUMMARY`: размер образа, находки trivy
-и замечания hadolint.
+и замечания hadolint; summary job'а `compose-smoke`: холодный старт стека.
 
-Две команды, только стандартная библиотека (скрипт зовут простым `python3`,
+Три команды, только стандартная библиотека (скрипт зовут простым `python3`,
 вне `uv`):
 
     python3 scripts/build_summary.py collect --image dmc268-api:ci \\
         --out build-summary/metrics.json
     python3 scripts/build_summary.py render --metrics metrics.json \\
         [--base base.json] [--trivy trivy.json] [--hadolint hadolint.json] \\
+        >> "$GITHUB_STEP_SUMMARY"
+    python3 scripts/build_summary.py startup --up-ms 41234 \\
+        --api-started-at 2026-11-16T10:00:00.123456789Z --api-logs api.log \\
         >> "$GITHUB_STEP_SUMMARY"
 
 `collect` берёт у `docker image inspect` размер и id образа, а сжатый размер
@@ -19,6 +22,13 @@
 develop считает по `base.json` — метрикам последней успешной сборки образа на
 develop.
 
+`startup` — холодный старт на чистом раннере: длительность `docker compose up
+-d --wait` (меряет шаг CI) и старт API — от `State.StartedAt` контейнера до
+записи uvicorn «Application startup complete.» в его логе с метками времени
+(`docker compose logs --timestamps`). Обе метки ставит Docker, поэтому цифра
+не зависит от частоты опроса. Нет значения — в ячейке прочерк, команда не
+падает: summary не должен ронять job.
+
 Порт `scripts/build-summary.mjs` фронтенда (dmc-268-ui-t1) без раздела бандла:
 у бэкенда его нет. Ключи значений — по семантическим соглашениям
 OpenTelemetry (`container.image.*`), чтобы отправить их в коллектор без
@@ -27,10 +37,12 @@ OpenTelemetry (`container.image.*`), чтобы отправить их в ко�
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import zlib
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import IO, Any, cast
 
@@ -39,6 +51,11 @@ SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN")
 # hadolint — всё, кроме style (failure-threshold info по умолчанию у action).
 TRIVY_GATE = ("CRITICAL", "HIGH")
 HADOLINT_LEVELS = ("error", "warning", "info", "style")
+
+# Сообщение uvicorn о готовности приложения: lifespan завершился, порт слушается.
+STARTUP_MARK = "Application startup complete."
+# Docker пишет время в RFC 3339 с наносекундами; datetime держит микросекунды.
+_DOCKER_TIME = re.compile(r"^(\S+?T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$")
 
 CHUNK = 1024 * 1024
 NO_METRICS = "Метрики не собраны: образ не собрался или `collect` упал."
@@ -250,6 +267,77 @@ def render(
     return "\n".join(out)
 
 
+# --- холодный старт -----------------------------------------------------------
+
+
+def parse_docker_time(value: str) -> datetime | None:
+    """Время Docker (`2026-11-16T10:00:00.123456789Z`) или None, если формат чужой.
+
+    Дробная часть обрезается до микросекунд: точнее datetime не хранит.
+    """
+    match = _DOCKER_TIME.match(value.strip())
+    if match is None:
+        return None
+    base, fraction, zone = match.groups()
+    micro = f".{fraction[:6]}" if fraction else ""
+    try:
+        return datetime.fromisoformat(
+            f"{base}{micro}{'+00:00' if zone == 'Z' else zone}"
+        )
+    except ValueError:
+        return None
+
+
+def api_startup_seconds(started_at: str, log_lines: Iterable[str]) -> float | None:
+    """Секунды от запуска контейнера до первой записи о готовности после него.
+
+    Строки — вывод `docker compose logs --timestamps --no-log-prefix`: метка
+    времени, пробел, запись. Записи до `started_at` (прошлый запуск контейнера)
+    не считаются. Нет запуска или записи — None.
+    """
+    start = parse_docker_time(started_at)
+    if start is None:
+        return None
+    for line in log_lines:
+        stamp, _, record = line.partition(" ")
+        if STARTUP_MARK not in record:
+            continue
+        at = parse_docker_time(stamp)
+        if at is not None and at >= start:
+            return (at - start).total_seconds()
+    return None
+
+
+def seconds(value: float | None) -> str:
+    return "—" if value is None else f"{value:.1f} с"
+
+
+def render_startup(up_seconds: float | None, api_seconds: float | None) -> str:
+    """Раздел summary `compose-smoke`: холодный старт стека и API."""
+    return "\n".join(
+        [
+            "## Холодный старт",
+            "",
+            (
+                "Чистый раннер: образы собираются и скачиваются заново. Цифры "
+                "информационные, порога нет — раннеры GitHub шумят."
+            ),
+            "",
+            "| Что | Ключ | Значение |",
+            "|---|---|---|",
+            (
+                "| `docker compose up -d --wait` — сборка, скачивание, все сервисы готовы "
+                f"| `dmc268.build.startup.compose` | {seconds(up_seconds)} |"
+            ),
+            (
+                "| API: запуск контейнера → «Application startup complete.» "
+                f"| `dmc268.build.startup.api` | {seconds(api_seconds)} |"
+            ),
+            "",
+        ]
+    )
+
+
 # --- CLI ---------------------------------------------------------------------
 
 
@@ -275,6 +363,10 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("--base")
     r.add_argument("--trivy")
     r.add_argument("--hadolint")
+    st = sub.add_parser("startup", help="markdown холодного старта в stdout")
+    st.add_argument("--up-ms", type=int, help="длительность docker compose up, мс")
+    st.add_argument("--api-started-at", help="State.StartedAt контейнера api")
+    st.add_argument("--api-logs", help="docker compose logs --timestamps api")
     return parser
 
 
@@ -289,6 +381,17 @@ def main(argv: list[str]) -> int:
         Path(args.out).write_text(
             json.dumps(metrics, indent=2) + "\n", encoding="utf-8"
         )
+        return 0
+    if args.command == "startup":
+        up = None if args.up_ms is None else args.up_ms / 1000
+        api = None
+        if args.api_started_at and args.api_logs:
+            try:
+                lines = Path(args.api_logs).read_text(encoding="utf-8").splitlines()
+            except OSError:
+                lines = []
+            api = api_startup_seconds(args.api_started_at, lines)
+        sys.stdout.write(render_startup(up, api) + "\n")
         return 0
     # Отчёт не той формы — то же, что битый файл: строка «Отчёта нет», а не падение.
     trivy = _read_json(args.trivy)
