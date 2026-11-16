@@ -18,10 +18,13 @@ from .scoring import (
     OutputCounts,
     Reported,
     aggregate,
+    calls_of,
     category_counts,
+    check_published,
     classify_calls,
     duplicates,
     f1_score,
+    failure_text,
     match,
     score_case,
     spread,
@@ -391,3 +394,37 @@ def test_f1_is_the_harmonic_mean_and_without_one_side_is_the_other() -> None:
     assert f1_score(None, 0.0) == 0.0  # промолчала везде
     assert f1_score(1.0, None) == 1.0  # найдены только необязательные
     assert f1_score(None, None) is None
+
+
+# --- обвязка прогонов на стенде ----------------------------------------------
+
+
+def test_failure_text_is_the_first_line_with_the_type_and_is_capped() -> None:
+    assert failure_text(AssertionError("воркер не обработал\nподробности")) == (
+        "AssertionError: воркер не обработал"
+    )
+    assert len(failure_text(ValueError("x" * 1000))) == 300
+
+
+def test_calls_of_counts_outcomes_and_survives_unreadable_steps() -> None:
+    def unreadable() -> list[ReviewRunStep]:
+        raise ConnectionError("база недоступна")
+
+    assert calls_of(lambda: [_step(ANALYSING)]) == OutputCounts(first_try=1)
+    assert calls_of(unreadable) == OutputCounts()
+    assert calls_of(None) == OutputCounts()
+
+
+class _Review:
+    def __init__(self, comments: int) -> None:
+        self.comments = [object()] * comments
+
+
+def test_check_published_passes_when_every_finding_reached_the_pr() -> None:
+    check_published([_Review(2), _Review(1)], 3, "TC-01")
+
+
+def test_check_published_fails_when_the_pr_lost_a_finding() -> None:
+    with pytest.raises(AssertionError, match="TC-01: в базе 3, в PR 2"):
+        check_published([_Review(2)], 3, "TC-01")
+

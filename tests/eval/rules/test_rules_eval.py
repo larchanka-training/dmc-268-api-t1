@@ -18,14 +18,11 @@ import json
 import os
 from pathlib import Path
 
-import httpx
 import pytest
-
-from app.infrastructure.container import llm_http_timeout
-from app.infrastructure.llm.openai_compatible import OpenAiCompatibleGateway
 
 from ...conftest import requires_broker, requires_db, requires_eurorouter
 from ...e2e.stack import Stack
+from ..live import eval_repetitions, live_gateway, run_timeout
 from ..prompts_hash import prompts_sha256
 from ..report import to_json, to_markdown
 from .corpus import CONFIGS, load_corpus
@@ -36,21 +33,13 @@ pytestmark = [pytest.mark.eval, requires_db, requires_broker, requires_euroroute
 
 def test_rules_eval_on_the_live_model(stack: Stack, tmp_path: Path) -> None:
     settings = stack.settings
-    model = OpenAiCompatibleGateway(
-        httpx.Client(base_url=settings.eurorouter_base_url, timeout=llm_http_timeout(settings)),
-        settings.eurorouter_model,
-        settings.eurorouter_keys,
-        name="Eurorouter",
-        max_attempts=settings.llm_max_attempts,
-        reasoning_effort=settings.eurorouter_reasoning_effort,
-    )
+    model = live_gateway(settings)
     configs = [c.strip() for c in (os.environ.get("EVAL_CONFIGS") or ",".join(CONFIGS)).split(",")]
     unknown = set(configs) - set(CONFIGS)
     assert not unknown, f"неизвестные конфигурации: {sorted(unknown)}"
-    repetitions = int(os.environ.get("EVAL_REPETITIONS") or 1)
+    repetitions = eval_repetitions()
     cases = load_corpus()
-    # Два вызова модели на прогон, каждый - до таймаута на каждую попытку, и запас на остальное.
-    timeout = 2 * settings.llm_timeout_seconds * settings.llm_max_attempts + 60
+    timeout = run_timeout(settings)
 
     results = run_corpus(stack, model, cases, configs, repetitions, timeout=timeout)
 

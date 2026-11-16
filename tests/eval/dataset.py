@@ -7,6 +7,9 @@
 `case_id`, не совпадающий с каталогом, якорь вне диффа - ошибка загрузки с
 именем кейса и находки, а не тихо искажённый Precision.
 
+Ответы можно взять и из внешнего каталога (`load_dataset(root, responses=DIR)`,
+раскладка `DIR/<case_id>/run-<n>.json`) - так считаются снимки живого прогона.
+
 Ответы модели загружаются сырым текстом: проверка схемой `ReviewOutput` - дело
 раннера, невалидный ответ - измерение (Valid-output rate), а не ошибка датасета.
 """
@@ -107,6 +110,8 @@ class GoldCase:
     max_findings: int | None
     injection: Injection | None
     responses: tuple[Response, ...]
+    # Текст `diff.patch` как есть: живой прогон отдаёт его в PR без пересборки.
+    diff: str
 
     @property
     def expected_issues(self) -> tuple[ExpectedIssue, ...]:
@@ -220,29 +225,43 @@ def _check_anchor(finding: GoldFinding, files: tuple[ParsedFile, ...], case_id: 
         )
 
 
-def _responses(case_dir: Path, case_id: str) -> tuple[Response, ...]:
-    folder = case_dir / "responses"
-    if not folder.is_dir():
-        raise _fail(case_id, "нет каталога responses/")
+def _responses(case_dir: Path, case_id: str, external: Path | None) -> tuple[Response, ...]:
+    """Ответы кейса: `responses/` кейса или, при `external`, `<external>/<case_id>/`."""
+    if external is None:
+        folder, label = case_dir / "responses", "responses/"
+        if not folder.is_dir():
+            raise _fail(case_id, "нет каталога responses/")
+    else:
+        folder = external / case_id
+        label = f"{folder.as_posix()}/"
+        if not folder.is_dir():
+            raise _fail(case_id, f"нет каталога ответов {label}")
     found: list[Response] = []
     for path in folder.iterdir():
         name = _RESPONSE.match(path.name)
         if name is None:
-            raise _fail(case_id, f"responses/{path.name}: ожидается run-<n>.json")
+            raise _fail(case_id, f"{label}{path.name}: ожидается run-<n>.json")
         found.append(Response(int(name.group(1)), path.read_text(encoding="utf-8")))
     if not found:
-        raise _fail(case_id, "в responses/ нет ни одного ответа run-<n>.json")
+        raise _fail(case_id, f"в {label} нет ни одного ответа run-<n>.json")
     return tuple(sorted(found, key=lambda r: r.repetition))
 
 
-def load_case(case_dir: Path, *, adversarial: bool) -> GoldCase:
-    """Кейс из каталога; `adversarial` - лежит ли он в `adversarial/`."""
+def load_case(
+    case_dir: Path, *, adversarial: bool, responses_dir: Path | None = None
+) -> GoldCase:
+    """Кейс из каталога; `adversarial` - лежит ли он в `adversarial/`.
+
+    `responses_dir` - внешний каталог ответов (`<responses_dir>/<case_id>/run-<n>.json`)
+    вместо `responses/` кейса: так раннер читает снимки живого прогона.
+    """
     case_id = case_dir.name
     for name in _CASE_FILES:
         if not (case_dir / name).is_file():
             raise _fail(case_id, f"нет файла {name}")
     mr = _merge_request(_read_json(case_dir / "mr.json", case_id), case_id)
-    files = tuple(parse_diff((case_dir / "diff.patch").read_text(encoding="utf-8")))
+    diff = (case_dir / "diff.patch").read_text(encoding="utf-8")
+    files = tuple(parse_diff(diff))
     if not files:
         raise _fail(case_id, "diff.patch пуст или не разбирается как unified diff")
 
@@ -305,21 +324,31 @@ def load_case(case_dir: Path, *, adversarial: bool) -> GoldCase:
         forbidden_categories=forbidden_categories,
         max_findings=max_findings,
         injection=injection,
-        responses=_responses(case_dir, case_id),
+        responses=_responses(case_dir, case_id, responses_dir),
+        diff=diff,
     )
 
 
-def load_dataset(root: Path = DATASET_DIR) -> tuple[GoldCase, ...]:
-    """Все кейсы датасета: `TC-*` из корня, затем `ADV-*` из `adversarial/`, по имени."""
+def load_dataset(
+    root: Path = DATASET_DIR, responses: Path | None = None
+) -> tuple[GoldCase, ...]:
+    """Все кейсы датасета: `TC-*` из корня, затем `ADV-*` из `adversarial/`, по имени.
+
+    `responses` - внешний каталог ответов вместо фикстур `responses/` (см. `load_case`);
+    требования те же: каталог на каждый кейс, только `run-<n>.json`, один набор повторов.
+    """
     if not root.is_dir():
         raise DatasetError(f"каталога датасета {root} нет")
     cases = [
-        load_case(d, adversarial=False)
+        load_case(d, adversarial=False, responses_dir=responses)
         for d in _case_dirs(root, _TC_DIR, allowed=frozenset({ADVERSARIAL_DIR}))
     ]
     adversarial = root / ADVERSARIAL_DIR
     if adversarial.is_dir():
-        cases += [load_case(d, adversarial=True) for d in _case_dirs(adversarial, _ADV_DIR)]
+        cases += [
+            load_case(d, adversarial=True, responses_dir=responses)
+            for d in _case_dirs(adversarial, _ADV_DIR)
+        ]
     if not cases:
         raise DatasetError(f"в {root} нет ни одного кейса TC-* или adversarial/ADV-*")
     _check_repetitions(cases)

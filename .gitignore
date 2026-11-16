@@ -50,3 +50,5 @@ dist/
 
 # Отчёт офлайн-eval золотого датасета (make eval-offline).
 eval-offline-report/
+# Артефакт живого бенчмарка (make eval-live-gold, job gold eval.yml).
+eval-live-gold/

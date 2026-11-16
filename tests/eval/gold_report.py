@@ -26,12 +26,12 @@ JSON_NAME = "report.json"
 MARKDOWN_NAME = "report.md"
 
 
-def _cell(text: str | None) -> str:
+def cell(text: str | None) -> str:
     """Текст в ячейку таблицы Markdown: `|` и перевод строки ломали бы строку таблицы."""
     return (text or "—").replace("|", "\\|").replace("\n", " ")
 
 
-def _num(value: float | None) -> str:
+def num(value: float | None) -> str:
     return "—" if value is None else f"{value:.2f}"
 
 
@@ -132,10 +132,15 @@ def to_markdown(
     kinds = ", ".join(f"{k} {n}" for k, n in info["kinds"].items())
     passed = all(g.passed for g in checked if g.active)
     verdict = "все действующие пороги пройдены" if passed else "есть непройденные пороги"
+    # Снимки живого прогона (`--responses`) должны отличаться от офлайн-отчёта по шапке.
+    if "responses_sha256" in info:
+        source = f"Ответы: внешний каталог, хэш `{info['responses_sha256'][:12]}`."
+    else:
+        source = "Зафиксированные ответы модели, без вызова модели."
     lines = [
         "# Офлайн-eval золотого датасета",
         "",
-        "Зафиксированные ответы модели, без вызова модели. Итог: " + verdict + ".",
+        source + " Итог: " + verdict + ".",
         "",
         (
             f"Хэш промптов: `{info['prompts_sha256'][:12]}`, хэш датасета: "
@@ -150,24 +155,24 @@ def to_markdown(
         "",
         "| Метрика | Значение |",
         "|---|---|",
-        f"| Precision | {_num(m.precision)} |",
-        f"| Recall (must_find) | {_num(m.recall)} |",
-        f"| F1 | {_num(m.f1)} |",
+        f"| Precision | {num(m.precision)} |",
+        f"| Recall (must_find) | {num(m.recall)} |",
+        f"| F1 | {num(m.f1)} |",
         f"| TP/TP(must)/FP/FN | {m.tp}/{m.tp_required}/{m.fp}/{m.fn} |",
         (
-            f"| Valid-output rate | {_num(summary.outputs.valid_rate)} "
+            f"| Valid-output rate | {num(summary.outputs.valid_rate)} "
             f"({summary.outputs.first_try}/{summary.outputs.first_try + summary.outputs.invalid}) |"
         ),
         (
-            f"| Duplicate rate | {_num(summary.duplicate_rate)} "
+            f"| Duplicate rate | {num(summary.duplicate_rate)} "
             f"({summary.duplicates}/{summary.findings}) |"
         ),
         (
-            f"| Abstention на негативных | {_num(summary.abstention)} "
+            f"| Abstention на негативных | {num(summary.abstention)} "
             f"({summary.silent_responses}/{summary.negative_responses}) |"
         ),
         f"| Injection-сьют | {summary.injection_passed}/{summary.injection_responses} |",
-        f"| Разброс F1 между повторами | {_num(summary.f1_spread)} |",
+        f"| Разброс F1 между повторами | {num(summary.f1_spread)} |",
         "",
         "## Пороги (LLM_EVAL §6)",
         "",
@@ -175,7 +180,7 @@ def to_markdown(
         "|---|---|---|---|---|",
     ]
     lines += [
-        f"| {g.metric} | {_num(g.value)} | {g.threshold} | {_gate_status(g)} | {_cell(g.note)} |"
+        f"| {g.metric} | {num(g.value)} | {g.threshold} | {_gate_status(g)} | {cell(g.note)} |"
         for g in checked
     ]
     lines += [
@@ -196,7 +201,7 @@ def to_markdown(
         "|---|---|---|---|---|---|---|",
     ]
     lines += [
-        f"| `{s.category}` | {_num(s.precision)} | {_num(s.recall)} | "
+        f"| `{s.category}` | {num(s.precision)} | {num(s.recall)} | "
         f"{s.counts.tp}/{s.counts.tp_required}/{s.counts.fp}/{s.counts.fn} | {s.cases} | "
         f"{s.expected} | "
         f"{'достаточно' if s.sufficient else 'недостаточно'} |"
@@ -208,7 +213,7 @@ def to_markdown(
         lines += ["", "## Injection-сьют", "", "| Кейс | Повтор | Итог |", "|---|---|---|"]
         lines += [
             f"| `{r.case_id}` | {r.repetition} | "
-            f"{'пройден' if r.injection_passed else '**провал**: ' + _cell(r.injection_failure)} |"
+            f"{'пройден' if r.injection_passed else '**провал**: ' + cell(r.injection_failure)} |"
             for r in suite
         ]
 
@@ -222,7 +227,7 @@ def to_markdown(
     for r in results:
         if r.score is None:
             lines.append(
-                f"| `{r.case_id}` | {r.kind} | {r.repetition} | нет: {_cell(r.error)} | — | — | — | — | — |"
+                f"| `{r.case_id}` | {r.kind} | {r.repetition} | нет: {cell(r.error)} | — | — | — | — | — |"
             )
             continue
         missed = ", ".join(f"`{m.split('/', 1)[1]}`" for m in r.score.missed) or "—"

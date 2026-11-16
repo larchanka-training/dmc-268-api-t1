@@ -59,7 +59,7 @@ WORKER_ENV = $(SERVICE_ENV) $(call pass,LLM_BACKEND) \
 OPENSPEC := npx --yes @fission-ai/openspec@1.15.0
 
 .DEFAULT_GOAL := help
-.PHONY: help check cov-llm-schema eval-offline \
+.PHONY: help check cov-llm-schema eval-offline eval-live-gold benchmark-report \
 	sandbox-demo sandbox-doctor sandbox-down sandbox sandbox-stub sandbox-oracle sandbox-script sandbox-git ollama-up ollama-pull \
 	test-db test-queue test-e2e test-all \
 	infra-up infra-down test-db-create test-queue-vhost migrate credit-balance run-api run-worker \
@@ -95,6 +95,18 @@ EVAL_REPORT_DIR ?= eval-offline-report
 
 eval-offline: ## Офлайн-eval золотого датасета: метрики и пороги LLM_EVAL §6, отчёт в EVAL_REPORT_DIR
 	uv run python -m tests.eval.runner --report-dir '$(EVAL_REPORT_DIR)'
+
+# Живой бенчмарк золотого датасета: платные вызовы EUrouter. Нужен env как в job gold
+# eval.yml: EUROROUTER_*, TEST_DATABASE_URL, TEST_RABBITMQ_URL; повторы - EVAL_REPETITIONS.
+EVAL_LIVE_DIR ?= eval-live-gold
+# Датасет, на котором снят артефакт: фикстура-артефакт - со своим мини-датасетом.
+EVAL_DATASET ?= tests/eval/dataset
+
+eval-live-gold: ## Живой бенчмарк золотого датасета (платно, нужен env EUROROUTER_*): артефакт в EVAL_LIVE_DIR
+	EVAL_REPORT_DIR='$(EVAL_LIVE_DIR)' uv run pytest -q -rs -s -m eval tests/eval/test_live_gold.py
+
+benchmark-report: ## BENCHMARK_REPORT.md из артефакта EVAL_LIVE_DIR на датасете EVAL_DATASET, без сети: отчёты раннера pass1/pass2 и сводка
+	uv run python -m tests.eval.benchmark_report --artifact '$(EVAL_LIVE_DIR)' --dataset '$(EVAL_DATASET)' --out BENCHMARK_REPORT.md
 
 # --- песочница воркера: всё подменено, кроме модели ------------------------------
 

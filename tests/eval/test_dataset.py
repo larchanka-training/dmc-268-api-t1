@@ -170,3 +170,63 @@ def test_cases_with_different_repetition_sets_are_rejected(tmp_path: Path) -> No
 
     with pytest.raises(DatasetError, match=r"один набор повторов.*TC-02-sql - \[1\]"):
         load_dataset(tmp_path)
+
+
+def _external(root: Path, case_id: str, *texts: str) -> None:
+    """Ответы кейса во внешнем каталоге: `<root>/<case_id>/run-<n>.json`."""
+    folder = root / case_id
+    folder.mkdir(parents=True)
+    for n, text in enumerate(texts, start=1):
+        (folder / f"run-{n}.json").write_text(text, encoding="utf-8")
+
+
+def test_responses_from_an_external_directory_replace_the_fixtures(tmp_path: Path) -> None:
+    write_case(tmp_path / "ds", "TC-01-sql")
+    write_case(
+        tmp_path / "ds",
+        "ADV-01-comment",
+        kind="adversarial",
+        expected=[],
+        injection={"forbidden_phrases": ["LGTM"], "expect_no_findings": True},
+    )
+    _external(tmp_path / "live", "TC-01-sql", "живой 1", "живой 2")
+    _external(tmp_path / "live", "ADV-01-comment", response(), "не JSON")
+
+    tc, adv = load_dataset(tmp_path / "ds", responses=tmp_path / "live")
+
+    assert [(r.repetition, r.text) for r in tc.responses] == [(1, "живой 1"), (2, "живой 2")]
+    assert [(r.repetition, r.text) for r in adv.responses] == [(1, response()), (2, "не JSON")]
+
+
+def test_case_without_its_directory_in_the_external_responses_is_rejected(
+    tmp_path: Path,
+) -> None:
+    write_case(tmp_path / "ds", "TC-01-sql")
+    write_case(tmp_path / "ds", "TC-02-sql")
+    _external(tmp_path / "live", "TC-01-sql", response())
+
+    with pytest.raises(DatasetError, match=r"TC-02-sql: нет каталога ответов .*live/TC-02-sql"):
+        load_dataset(tmp_path / "ds", responses=tmp_path / "live")
+
+
+def test_external_responses_out_of_contract_are_rejected(tmp_path: Path) -> None:
+    write_case(tmp_path / "ds", "TC-01-sql")
+    (tmp_path / "live" / "TC-01-sql").mkdir(parents=True)
+    with pytest.raises(DatasetError, match="TC-01-sql: в .* нет ни одного ответа"):
+        load_dataset(tmp_path / "ds", responses=tmp_path / "live")
+
+    (tmp_path / "live" / "TC-01-sql" / "best.json").write_text("{}")
+    with pytest.raises(DatasetError, match=r"TC-01-sql: .*best.json: ожидается run-<n>.json"):
+        load_dataset(tmp_path / "ds", responses=tmp_path / "live")
+
+
+def test_external_responses_with_different_repetition_sets_are_rejected(
+    tmp_path: Path,
+) -> None:
+    write_case(tmp_path / "ds", "TC-01-sql")
+    write_case(tmp_path / "ds", "TC-02-sql")
+    _external(tmp_path / "live", "TC-01-sql", response(), response())
+    _external(tmp_path / "live", "TC-02-sql", response())
+
+    with pytest.raises(DatasetError, match=r"один набор повторов.*TC-02-sql - \[1\]"):
+        load_dataset(tmp_path / "ds", responses=tmp_path / "live")
