@@ -26,6 +26,7 @@ from app.application.ports.installation_catalog import InstallationCatalog
 from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.unit_of_work import UnitOfWork
 from app.application.use_cases.user_token import call_with_user_token
+from app.domain.demo import demo_installation_repository, is_demo_repository
 from app.domain.entities import (
     InstallationRepository,
     Repository,
@@ -70,6 +71,8 @@ class UserContext:
     session_id: UUID
     # Пользователь сессии: подключивший репозиторий становится его плательщиком (`review-billing`).
     user_id: UUID
+    # Демо-пользователь (change `demo-mode`): видимые репозитории — из базы, без провайдера.
+    demo: bool = False
 
 
 def list_with_connections(
@@ -110,7 +113,14 @@ def list_user_repositories(
 
     Видимость прогонов (GET /reviews, GET /events) сопоставляет их с подключёнными
     сама, одним запросом, — запись в сервисе ей не нужна.
+
+    Демо-пользователю (change `demo-mode`) видны демо-репозитории, за которые он записан
+    плательщиком: читаются из базы, провайдер не спрашивается — токена у демо нет.
     """
+    if user.demo:
+        with uow:
+            paid = uow.repositories.list_paid_by(user.user_id)
+        return [demo_installation_repository(r) for r in paid if is_demo_repository(r)]
     return call_with_user_token(uow, user.oauth, user.session_id, now, catalog.list_repositories)
 
 

@@ -30,7 +30,12 @@ from app.api.errors import ERRORS_502_SCM_EVENTS
 from app.api.repositories import user_repositories
 from app.api.reviews import VISIBILITY_RULE, review_run_list_item
 from app.api.schemas import STREAM_HEADERS_DOC
-from app.api.session import SESSION_COOKIE, SESSION_REQUIRED, SESSION_RESPONSES
+from app.api.session import (
+    SESSION_COOKIE,
+    SESSION_REQUIRED,
+    SESSION_RESPONSES,
+    current_session,
+)
 from app.application.ports import RunChanges, UnitOfWork
 from app.application.ports.run_changes import RunChangesLost
 from app.application.run_feed_events import (
@@ -38,7 +43,8 @@ from app.application.run_feed_events import (
     run_feed_events,
     visible_repository_ids,
 )
-from app.application.use_cases.auth import authenticate
+from app.application.use_cases.auth import SignedIn, authenticate
+from app.domain.demo import is_demo_user
 from app.domain.entities import InstallationRepository, ReviewRunListEntry
 from app.domain.run_events import PingEvent
 from app.domain.run_feed import BATCH_LIMIT, RunFeedState, open_feed, start_feed
@@ -177,6 +183,7 @@ class _EventStream(StreamingResponse):
 async def stream_events(
     request: Request,
     repositories: list[InstallationRepository] = Depends(user_repositories),
+    signed_in: SignedIn = Depends(current_session),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
     untraced_uow_factory: Callable[[], UnitOfWork] = Depends(get_untraced_unit_of_work_factory),
     run_changes: RunChanges = Depends(get_run_changes),
@@ -196,9 +203,14 @@ async def stream_events(
     async def read(state: RunFeedState) -> list[ReviewRunListEntry]:
         return await run_in_threadpool(read_sync, state)
 
+    demo = is_demo_user(signed_in.user)
+
     async def session_alive() -> bool:
-        signed_in = await run_in_threadpool(authenticate, untraced_uow_factory(), token, datetime.now(UTC))
-        return signed_in is not None
+        # Демо-пользователя (change `demo-mode`) нечем отозвать: поток живёт, пока открыта вкладка.
+        if demo:
+            return True
+        alive = await run_in_threadpool(authenticate, untraced_uow_factory(), token, datetime.now(UTC))
+        return alive is not None
 
     # Подписка — раньше первого чтения: изменение, закоммиченное между ними, придёт
     # сигналом, а не потеряется. Источник недоступен — поток из одной строки `retry`:

@@ -14,11 +14,13 @@ from http import HTTPStatus
 from fastapi import Depends, Request, Response, Security
 from fastapi.security import APIKeyCookie
 
-from app.api.dependencies import get_unit_of_work_factory
+from app.api.dependencies import get_settings, get_unit_of_work_factory
 from app.api.errors import ERRORS_401_SESSION, ApiError
 from app.api.problems import ErrorCode
+from app.application.demo import demo_fallback
 from app.application.ports import UnitOfWork
-from app.application.use_cases.auth import SignedIn, authenticate
+from app.application.use_cases.auth import SignedIn, authenticate, demo_sign_in
+from app.config import Settings
 from app.domain.entities import User
 from app.domain.session import SESSION_LIFETIME
 
@@ -68,15 +70,28 @@ def clear_session_cookie(response: Response) -> None:
 
 def current_session(
     request: Request,
+    response: Response,
     token: str | None = Security(_SESSION_SCHEME),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
+    settings: Settings = Depends(get_settings),
 ) -> SignedIn:
-    """Пользователь и id сессии из cookie или `401`."""
+    """Пользователь и id сессии из cookie или `401`.
+
+    В демо-режиме читающий запрос без действительной сессии получает демо-пользователя
+    (change `demo-mode`); недействительная cookie удаляется и тогда.
+    """
     signed_in = authenticate(uow_factory(), token, datetime.now(UTC))
-    if signed_in is None:
-        # Пустую `session=` схема отдаёт как None, а удалить её всё равно надо.
-        raise Unauthenticated(had_cookie=SESSION_COOKIE in request.cookies)
-    return signed_in
+    if signed_in is not None:
+        return signed_in
+    # Пустую `session=` схема отдаёт как None, а удалить её всё равно надо.
+    had_cookie = SESSION_COOKIE in request.cookies
+    if demo_fallback(settings.demo_mode, request.method, has_session=False):
+        demo = demo_sign_in(uow_factory())
+        if demo is not None:
+            if had_cookie:
+                clear_session_cookie(response)
+            return demo
+    raise Unauthenticated(had_cookie=had_cookie)
 
 
 def current_user(signed_in: SignedIn = Depends(current_session)) -> User:

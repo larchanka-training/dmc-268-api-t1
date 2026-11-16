@@ -54,6 +54,7 @@ from app.application.use_cases.auth import (
     start_login,
 )
 from app.application.use_cases.user_token import SessionClosed, revoke_quietly
+from app.domain.demo import is_demo_user
 from app.domain.entities import User
 from app.domain.enums import Provider
 from app.domain.ids import new_id
@@ -116,6 +117,13 @@ class UserResponse(BaseModel):
             "Репозитории, где пользователь записан плательщиком, по `full_name`. Не зависит от доступа на "
             "GitHub: ушедший из организации плательщик видит здесь, от чего отказаться "
             "(DELETE /repositories/{id}/payer)."
+        )
+    )
+    is_demo: bool = Field(
+        description=(
+            "Демо-пользователь: сервис запущен в демо-режиме (DEMO_MODE) и запрос пришёл без сессии. "
+            "Данные — демо из скрипта начальных данных, изменяющие запросы без входа отвечают 401. "
+            "У вошедшего пользователя — false."
         )
     )
 
@@ -349,7 +357,8 @@ def _setup_done(outcome: str) -> Response:
     summary="Пользователь текущей сессии",
     description=(
         "Требует сессию. По ответу кабинет решает, показывать ли страницу входа. Баланс и оплачиваемые "
-        "репозитории читаются из базы на каждый запрос."
+        "репозитории читаются из базы на каждый запрос. В демо-режиме (DEMO_MODE) без сессии — `200` "
+        "с профилем демо-пользователя и `is_demo = true`."
     ),
     response_description="Профиль пользователя.",
     responses=SESSION_RESPONSES,
@@ -369,6 +378,7 @@ def me(
         avatar_url=user.avatar_url,
         balance_eur=euro_string(balance),
         paid_repositories=[PaidRepository(id=r.id, full_name=r.full_name) for r in paid],
+        is_demo=is_demo_user(user),
     )
 
 

@@ -140,6 +140,7 @@ def test_callback_sets_the_session_and_returns_to_the_deep_link(stand) -> None:
         "avatar_url": "https://avatars.githubusercontent.com/u/583231",
         "balance_eur": "0",
         "paid_repositories": [],
+        "is_demo": False,
     }
 
 

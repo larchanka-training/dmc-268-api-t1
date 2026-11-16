@@ -67,6 +67,7 @@ from app.application.use_cases.repository_rules import load_default_branch_rules
 from app.application.use_cases.run_diff import RepositoryNotInstalled
 from app.application.use_cases.user_token import SessionClosed
 from app.config import Settings
+from app.domain.demo import is_demo_repository, is_demo_user
 from app.domain.entities import (
     InstallationRepository,
     RepoRules,
@@ -307,7 +308,12 @@ def as_user[T](signed_in: SignedIn, oauth: OAuthProvider, call: Callable[[connec
     Токен непригоден — сессия закрыта, `401 UNAUTHENTICATED`; GitHub недоступен —
     `502 SCM_UNAVAILABLE`.
     """
-    user = connecting.UserContext(oauth=oauth, session_id=signed_in.session_id, user_id=signed_in.user.id)
+    user = connecting.UserContext(
+        oauth=oauth,
+        session_id=signed_in.session_id,
+        user_id=signed_in.user.id,
+        demo=is_demo_user(signed_in.user),
+    )
     try:
         return call(user)
     except SessionClosed:
@@ -439,10 +445,14 @@ def list_repositories(
     )
     # Строк не больше, чем отдаёт GitHub пользователю: страница — срез в памяти.
     page = listed[offset : offset + page_size(limit)]
-    slug = app_slug()
-    # Cookie проверена `current_session`; `state` — от неё, Setup URL сверит его с той же cookie.
-    state = setup_state(request.cookies[SESSION_COOKIE])
-    install_url = app_install_url(slug, state) if slug else None
+    # Демо-пользователю (change `demo-mode`) ставить приложение некуда: сессии и cookie у него нет.
+    if is_demo_user(signed_in.user):
+        install_url = None
+    else:
+        slug = app_slug()
+        # Cookie проверена `current_session`; `state` — от неё, Setup URL сверит его с той же cookie.
+        state = setup_state(request.cookies[SESSION_COOKIE])
+        install_url = app_install_url(slug, state) if slug else None
     return RepositoryListResponse(items=[_list_item(item) for item in page], install_url=install_url)
 
 
@@ -831,6 +841,9 @@ def get_repository_rules(
     # Ветка и имя — из ответа GitHub, как в GET /repositories: ветку по умолчанию могли сменить
     # или переименовать после подключения.
     repository = replace(stored, full_name=host.full_name, default_branch=host.default_branch)
+    # Демо-репозитория на GitHub нет (change `demo-mode`): правил у него нет, провайдер не спрашиваем.
+    if is_demo_repository(stored):
+        return _rules_response(RepoRules(status=RulesStatus.ABSENT), repository.default_branch)
     try:
         rules = load_default_branch_rules(
             repository,

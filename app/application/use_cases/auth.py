@@ -19,7 +19,9 @@ from uuid import UUID
 
 from app.application.ports.oauth_provider import OAuthProvider
 from app.application.ports.unit_of_work import UnitOfWork
+from app.domain.demo import DEMO_PROVIDER_USER_ID, DEMO_SESSION_ID
 from app.domain.entities import OAuthProfile, Secret, User
+from app.domain.enums import Provider
 from app.domain.login import LoginError, OAuthProviderUnavailable, safe_redirect
 from app.domain.provider_token import (
     ProviderTokenBusy,
@@ -137,6 +139,16 @@ def complete_login(
         _log.warning("вход не завершён: %s", failure)
         return LoginFailed(LoginError.PROVIDER_UNAVAILABLE)
     return LoginSucceeded(token=token, redirect=safe_redirect(redirect))
+
+
+def demo_sign_in(uow: UnitOfWork) -> SignedIn | None:
+    """Демо-пользователь вместо сессии (change `demo-mode`); `None`, если начальных данных нет.
+
+    Без записанного демо-пользователя демо-режим ведёт себя как выключенный — `401`.
+    """
+    with uow as work:
+        user = work.users.find_by_provider(Provider.GITHUB, DEMO_PROVIDER_USER_ID)
+    return None if user is None else SignedIn(user=user, session_id=DEMO_SESSION_ID)
 
 
 def authenticate(uow: UnitOfWork, token: str | None, now: datetime) -> SignedIn | None:

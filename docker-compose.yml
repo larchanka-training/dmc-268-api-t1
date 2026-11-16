@@ -160,6 +160,9 @@ services:
       GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
       GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-}
+      # Демо-режим (change `demo-mode`): без входа кабинет показывает демо-данные
+      # сервиса `seed`. В .env.example включён, на стенде запрещён (deploy.yml).
+      DEMO_MODE: ${DEMO_MODE:-false}
       # Ключ шифрования токенов пользователя (openssl rand -base64 32): пустой —
       # вход отказывает, токен открытым не хранится никогда.
       USER_TOKEN_ENCRYPTION_KEY: ${USER_TOKEN_ENCRYPTION_KEY:-}
@@ -235,6 +238,23 @@ services:
     # --timeout-graceful-shutdown — по той же причине: открытый поток SSE иначе
     # держал бы остановку до конца прогона (подробно — в Dockerfile у CMD).
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "5"]
+
+  # Демо-данные для демо-режима (change `demo-mode`): одноразовый, после миграций.
+  # Без DEMO_MODE=true ничего не пишет и выходит с кодом 0; повтор ничего не дублирует.
+  seed:
+    build: .
+    environment:
+      # Роль приложения, как у api и worker: seed пишет строки, схему не трогает.
+      DATABASE_URL: postgresql+psycopg://dmc268_app:dmc268_app@postgres:5432/dmc268
+      # Settings требует все три обязательные настройки, даже когда нужна одна база.
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      GITHUB_WEBHOOK_SECRET: local-dev-secret
+      DEMO_MODE: ${DEMO_MODE:-false}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "-m", "app.worker.seed_demo"]
+    restart: "no"
 
   worker:
     build: .
