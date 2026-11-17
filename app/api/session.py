@@ -17,7 +17,6 @@ from fastapi.security import APIKeyCookie
 from app.api.dependencies import get_settings, get_unit_of_work_factory
 from app.api.errors import ERRORS_401_SESSION, ApiError
 from app.api.problems import ErrorCode
-from app.application.demo import demo_fallback
 from app.application.ports import UnitOfWork
 from app.application.use_cases.auth import SignedIn, authenticate, demo_sign_in
 from app.config import Settings
@@ -85,7 +84,8 @@ def current_session(
         return signed_in
     # Пустую `session=` схема отдаёт как None, а удалить её всё равно надо.
     had_cookie = SESSION_COOKIE in request.cookies
-    if demo_fallback(settings.demo_mode, request.method, has_session=False):
+    # Демо — только чтение: изменяющий запрос без сессии получает `401`, как вне демо-режима.
+    if settings.demo_mode and request.method == "GET":
         demo = demo_sign_in(uow_factory())
         if demo is not None:
             if had_cookie:

@@ -22,8 +22,8 @@
 
 ## Impact
 
-- Код: `app/config.py` (`demo_mode`), `app/domain/demo.py`, `app/application/demo.py`, `app/api/session.py` (запасной демо-вход в `current_session`), use case `list_user_repositories` (ветка демо), `app/api/repositories.py` (правила и `install_url` демо), `app/api/events.py`, `app/api/auth.py` (`is_demo`), новые `app/application/use_cases/seed_demo.py` и `app/worker/seed_demo.py`.
+- Код: `app/config.py` (`demo_mode`), `app/domain/demo.py`, `app/api/session.py` (запасной демо-вход в `current_session`), use case `list_user_repositories` (ветка демо), `app/api/repositories.py` (правила и `install_url` демо), `app/api/events.py`, `app/api/auth.py` (`is_demo`), новые `app/application/use_cases/seed_demo.py` и `app/worker/seed_demo.py`.
 - Контракт API: поле `is_demo` в ответе `/auth/me`, перегенерация `docs/openapi/openapi.json`.
 - `docker-compose.yml` (сервис `seed`), `.env.example`, `README.md`, job `compose-smoke` в CI.
-- Деплой: `deploy.yml` отклоняет `DEMO_MODE=true`.
+- Деплой: `infra/` не передаёт `DEMO_MODE` приложению стенда; `deploy.yml` не меняется.
 - Фронтенд (отдельная подзадача в `dmc-268-ui-t1`): плашка демо-режима по `is_demo`, кнопки изменений скрыты.

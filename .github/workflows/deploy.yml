@@ -60,18 +60,6 @@ jobs:
     outputs:
       sha: ${{ steps.pick.outputs.sha }}
     steps:
-      # Демо-режим (change `demo-mode`) — только для локального compose: на стенде
-      # анонимный читающий запрос получил бы демо-данные вместо 401. infra/ его не
-      # передаёт; шаг ловит попытку завести DEMO_MODE переменной репозитория — до
-      # сборки образа и до сервера.
-      - name: Отклонить демо-режим
-        env:
-          DEMO_MODE: ${{ vars.DEMO_MODE }}
-        run: |
-          if [ "$(printf '%s' "$DEMO_MODE" | tr '[:upper:]' '[:lower:]')" = true ]; then
-            echo "::error::DEMO_MODE=true на стенде запрещён: демо-режим — только для локального compose"
-            exit 1
-          fi
       - name: Выбрать коммит
         id: pick
         env:

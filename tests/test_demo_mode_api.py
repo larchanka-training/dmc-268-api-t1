@@ -19,7 +19,7 @@ from app.api.dependencies import (
     get_untraced_unit_of_work_factory,
 )
 from app.api.factory import create_app
-from app.api.session import SESSION_COOKIE
+from app.api.session import SESSION_COOKIE, current_session, current_user
 from app.application.ports.run_changes import RunChangesLost
 from app.application.use_cases.seed_demo import demo_dataset, seed_demo
 from app.config import Settings
@@ -173,8 +173,16 @@ def test_demo_mode_without_seed_behaves_as_off() -> None:
     assert (response.status_code, response.json()["code"]) == (401, "UNAUTHENTICATED")
 
 
-def test_signed_in_user_does_not_see_demo_runs(demo: Demo) -> None:
+def _signed_in_for_real(demo: Demo) -> dict[str, str]:
+    """Живая сессия без подмены `current_session`: приоритет сессии над демо решает сам код."""
     cookies = sign_in_with_session(demo.app, demo.uow)
+    demo.app.dependency_overrides.pop(current_session)
+    demo.app.dependency_overrides.pop(current_user)
+    return cookies
+
+
+def test_signed_in_user_does_not_see_demo_runs(demo: Demo) -> None:
+    cookies = _signed_in_for_real(demo)
 
     reviews = demo.client(cookies).get("/api/v1/reviews")
     me = demo.client(cookies).get("/api/v1/auth/me")
@@ -183,6 +191,27 @@ def test_signed_in_user_does_not_see_demo_runs(demo: Demo) -> None:
     assert reviews.json()["items"] == []
     assert demo.catalog.calls == ["list_repositories"]
     assert me.json()["is_demo"] is False
+
+
+def test_after_logout_reading_is_demo_and_changing_is_unauthenticated(demo: Demo) -> None:
+    """Спека `user-auth`, «Выход»: в демо-режиме `GET` с cookie вышедшей сессии — демо, запись — `401`."""
+    cookies = _signed_in_for_real(demo)
+    client = demo.client(cookies)
+    before = client.get("/api/v1/auth/me")
+
+    logout = client.post("/api/v1/auth/logout", headers={"Origin": ORIGIN})
+    after = demo.client(cookies).get("/api/v1/auth/me")
+    change = demo.client(cookies).post(
+        "/api/v1/reviews",
+        json={"repository_id": str(API_REPOSITORY.id), "pull_request_number": 12},
+        headers={"Origin": ORIGIN},
+    )
+
+    assert before.json()["is_demo"] is False
+    assert logout.status_code == 204
+    assert (after.status_code, after.json()["is_demo"]) == (200, True)
+    assert 'session=""' in after.headers["set-cookie"] and "Max-Age=0" in after.headers["set-cookie"]
+    assert (change.status_code, change.json()["code"]) == (401, "UNAUTHENTICATED")
 
 
 def test_event_stream_without_session_stays_open(demo: Demo) -> None:

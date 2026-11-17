@@ -230,15 +230,17 @@ def seed_demo(uow: UnitOfWork, dataset: DemoDataset) -> SeedOutcome:
     По транзакции на уровень внешних ключей: у моделей нет связей ORM между таблицами, и в
     одном flush порядок вставки разных таблиц не гарантирован — строка могла бы уйти раньше
     той, на которую ссылается. Упавший посередине запуск повтор дописывает: каждый уровень
-    проверяет свои строки сам. Зачисление — только вместе с новым пользователем: журнал
-    баланса идемпотентен лишь по сессии Stripe.
+    проверяет свои строки сам. Зачисление — только при нулевом балансе: журнал баланса
+    идемпотентен лишь по сессии Stripe, а расхода у демо-пользователя нет — он только читает,
+    и у демо-прогонов нет стоимости. Поэтому ноль значит «кредита нет», в том числе когда
+    прошлый запуск упал между записью пользователя и зачислением.
     """
     with uow:
-        new_user = uow.users.add(dataset.user)
+        uow.users.add(dataset.user)
         uow.commit()
     repositories = 0
     with uow:
-        if new_user:
+        if uow.billing.balance(dataset.user.id) == 0:
             uow.billing.add_credit(dataset.credit)
         for repository in dataset.repositories:
             if uow.repositories.get(repository.id) is None and uow.repositories.add(repository):

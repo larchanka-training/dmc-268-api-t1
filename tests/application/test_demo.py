@@ -1,4 +1,4 @@
-"""Демо-режим (change `demo-mode`): решение о демо-пользователе, вход демо, видимость и seed.
+"""Демо-режим (change `demo-mode`): вход демо, видимость и seed.
 
 Без базы и сети: фейк unit of work. Запись в настоящую базу — `tests/db/test_seed_demo.py`.
 """
@@ -7,9 +7,6 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-import pytest
-
-from app.application.demo import demo_fallback
 from app.application.use_cases.auth import demo_sign_in
 from app.application.use_cases.connect_repository import (
     UserContext,
@@ -29,24 +26,6 @@ from ..fakes.oauth import FakeOAuthProvider
 from ..fakes.unit_of_work import FakeUnitOfWork
 
 NOW = datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
-
-
-@pytest.mark.parametrize("method", ["GET", "HEAD", "get"])
-def test_read_without_session_in_demo_mode_falls_back(method: str) -> None:
-    assert demo_fallback(True, method, has_session=False)
-
-
-@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
-def test_change_without_session_never_falls_back(method: str) -> None:
-    assert not demo_fallback(True, method, has_session=False)
-
-
-def test_signed_in_user_stays_themselves() -> None:
-    assert not demo_fallback(True, "GET", has_session=True)
-
-
-def test_without_demo_mode_nothing_falls_back() -> None:
-    assert not demo_fallback(False, "GET", has_session=False)
 
 
 def _seeded() -> FakeUnitOfWork:
@@ -116,4 +95,16 @@ def test_seed_writes_everything_once() -> None:
     assert uow.users.get(DEMO_USER_ID) == dataset.user
     assert [len(uow.findings.list_for_run(run.id)) for run in dataset.runs] == [4, 0, 0]
     assert [len(uow.review_run_steps.list_for_run(run.id)) for run in dataset.runs] == [5, 3, 3]
+    assert uow.billing.balance(DEMO_USER_ID) == 10
+
+
+def test_seed_credits_a_user_left_by_a_failed_run() -> None:
+    """Прошлый запуск упал между записью пользователя и зачислением: повтор зачисляет."""
+    uow = FakeUnitOfWork()
+    dataset = demo_dataset(NOW)
+    uow.users.add(dataset.user)
+
+    seed_demo(uow, dataset)
+    seed_demo(uow, dataset)
+
     assert uow.billing.balance(DEMO_USER_ID) == 10
