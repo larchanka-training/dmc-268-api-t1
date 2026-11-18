@@ -161,7 +161,8 @@ services:
       GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-}
       # Демо-режим (change `demo-mode`): без входа кабинет показывает демо-данные
-      # сервиса `seed`. В .env.example включён, на стенде запрещён (deploy.yml).
+      # сервиса `seed`. В .env.example включён; `infra/` не передаёт `DEMO_MODE`
+      # стенду (`tests/test_demo_mode_deploy.py`).
       DEMO_MODE: ${DEMO_MODE:-false}
       # Ключ шифрования токенов пользователя (openssl rand -base64 32): пустой —
       # вход отказывает, токен открытым не хранится никогда.

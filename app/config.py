@@ -120,8 +120,8 @@ class Settings(BaseSettings):
     )
 
     # Демо-режим (change `demo-mode`): читающий запрос без сессии видит демо-данные
-    # из скрипта начальных данных. Для локального compose; на стенде включить его
-    # не даёт проверка конфигурации в deploy.yml.
+    # из скрипта начальных данных. Для локального compose; `infra/` не передаёт
+    # `DEMO_MODE` стенду (`tests/test_demo_mode_deploy.py`).
     demo_mode: bool = Field(
         default=False,
         description="Читающие запросы без сессии обслуживать как демо-пользователя; из DEMO_MODE",
