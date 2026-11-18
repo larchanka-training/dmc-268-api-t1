@@ -39,6 +39,11 @@ trace.set_tracer_provider(_provider)
 METRIC_READER = InMemoryMetricReader()
 metrics.set_meter_provider(MeterProvider(metric_readers=[METRIC_READER]))
 
+# `.env` из `.env.example` включает демо-режим, и `Settings` прочитал бы его:
+# анонимный GET тестов ручек ушёл бы в демо и в настоящую базу. Переменная
+# окружения сильнее `.env`; демо-тесты передают `demo_mode=True` явно.
+os.environ["DEMO_MODE"] = "false"
+
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
 TEST_RABBITMQ_URL = os.environ.get("TEST_RABBITMQ_URL")
 

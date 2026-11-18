@@ -30,7 +30,13 @@ from app.api.errors import ERRORS_502_SCM_EVENTS
 from app.api.repositories import user_repositories
 from app.api.reviews import VISIBILITY_RULE, review_run_list_item
 from app.api.schemas import STREAM_HEADERS_DOC
-from app.api.session import SESSION_COOKIE, SESSION_REQUIRED, SESSION_RESPONSES
+from app.api.session import (
+    SESSION_COOKIE,
+    SESSION_REQUIRED,
+    SESSION_RESPONSES,
+    clear_session_cookie,
+    current_session,
+)
 from app.application.ports import RunChanges, UnitOfWork
 from app.application.ports.run_changes import RunChangesLost
 from app.application.run_feed_events import (
@@ -38,7 +44,8 @@ from app.application.run_feed_events import (
     run_feed_events,
     visible_repository_ids,
 )
-from app.application.use_cases.auth import authenticate
+from app.application.use_cases.auth import SignedIn, authenticate
+from app.domain.demo import is_demo_user
 from app.domain.entities import InstallationRepository, ReviewRunListEntry
 from app.domain.run_events import PingEvent
 from app.domain.run_feed import BATCH_LIMIT, RunFeedState, open_feed, start_feed
@@ -177,12 +184,14 @@ class _EventStream(StreamingResponse):
 async def stream_events(
     request: Request,
     repositories: list[InstallationRepository] = Depends(user_repositories),
+    signed_in: SignedIn = Depends(current_session),
     uow_factory: Callable[[], UnitOfWork] = Depends(get_unit_of_work_factory),
     untraced_uow_factory: Callable[[], UnitOfWork] = Depends(get_untraced_unit_of_work_factory),
     run_changes: RunChanges = Depends(get_run_changes),
     clock: Callable[[], float] = Depends(get_clock),
 ) -> StreamingResponse:
     token = request.cookies.get(SESSION_COOKIE)
+    had_cookie = SESSION_COOKIE in request.cookies
     connected_at = datetime.now(UTC)
     # Набор видимых — один раз, до потока: сбой провайдера уже стал 502 в зависимости.
     visible = await run_in_threadpool(visible_repository_ids, uow_factory(), repositories)
@@ -196,9 +205,22 @@ async def stream_events(
     async def read(state: RunFeedState) -> list[ReviewRunListEntry]:
         return await run_in_threadpool(read_sync, state)
 
+    demo = is_demo_user(signed_in.user)
+
     async def session_alive() -> bool:
-        signed_in = await run_in_threadpool(authenticate, untraced_uow_factory(), token, datetime.now(UTC))
-        return signed_in is not None
+        # Демо-пользователя (change `demo-mode`) нечем отозвать: поток живёт, пока открыта вкладка.
+        if demo:
+            return True
+        alive = await run_in_threadpool(authenticate, untraced_uow_factory(), token, datetime.now(UTC))
+        return alive is not None
+
+    def respond(content: Any) -> StreamingResponse:
+        stream = _EventStream(content, media_type="text/event-stream", headers=_HEADERS)
+        # Удаление cookie, которое `current_session` пишет в свой ответ зависимости, в собственный
+        # ответ ручки не попадает: демо с cookie неизвестной сессии удаляет её здесь сам.
+        if demo and had_cookie:
+            clear_session_cookie(stream)
+        return stream
 
     # Подписка — раньше первого чтения: изменение, закоммиченное между ними, придёт
     # сигналом, а не потеряется. Источник недоступен — поток из одной строки `retry`:
@@ -206,7 +228,7 @@ async def stream_events(
     try:
         changes = await run_changes.subscribe()
     except RunChangesLost:
-        return _EventStream(iter([_RETRY]), media_type="text/event-stream", headers=_HEADERS)
+        return respond(iter([_RETRY]))
     # Первое чтение — до ответа: всё, что оно видит, клиент получит снимком REST после `open`,
     # а изменения после него — событиями.
     opened = open_feed(connected_at)
@@ -226,4 +248,4 @@ async def stream_events(
         finally:
             changes.close()
 
-    return _EventStream(body(), media_type="text/event-stream", headers=_HEADERS)
+    return respond(body())

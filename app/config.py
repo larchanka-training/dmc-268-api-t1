@@ -119,6 +119,14 @@ class Settings(BaseSettings):
         description="Публичный origin сервиса, например https://review.example; из PUBLIC_ORIGIN",
     )
 
+    # Демо-режим (change `demo-mode`): читающий запрос без сессии видит демо-данные
+    # из скрипта начальных данных. Для локального compose; `infra/` не передаёт
+    # `DEMO_MODE` стенду (`tests/test_demo_mode_deploy.py`).
+    demo_mode: bool = Field(
+        default=False,
+        description="Читающие запросы без сессии обслуживать как демо-пользователя; из DEMO_MODE",
+    )
+
     # Ключ шифрования токенов пользователя GitHub в базе (AES-256-GCM):
     # 32 байта в base64, `openssl rand -base64 32`. Пустой — вход отказывает
     # (токен открытым не пишется никогда), битый — старт падает здесь же.
