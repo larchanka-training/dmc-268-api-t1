@@ -234,3 +234,20 @@ def test_event_stream_without_session_stays_open(demo: Demo) -> None:
     # Поток пережил проверки сессии на 5, 10 и 15 с и успел отдать ping, закрыл его только обрыв источника.
     assert "event: ping" in response.text
     assert clock["now"] == 20
+
+
+@pytest.mark.parametrize("available", [True, False], ids=["stream", "source_lost"])
+def test_event_stream_with_unknown_session_deletes_cookie(demo: Demo, available: bool) -> None:
+    """Как у остальных `GET` в демо: cookie неизвестной сессии удаляется и в ответе потока."""
+
+    async def lost(timeout: float) -> bool:
+        raise RunChangesLost
+
+    demo.app.dependency_overrides[get_untraced_unit_of_work_factory] = lambda: lambda: demo.uow
+    demo.app.dependency_overrides[get_run_changes] = lambda: FakeRunChanges(lost, available=available)
+
+    response = demo.client({SESSION_COOKIE: "unknown"}).get("/api/v1/events")
+
+    assert response.status_code == 200
+    assert response.text.startswith("retry: 3000")
+    assert 'session=""' in response.headers["set-cookie"] and "Max-Age=0" in response.headers["set-cookie"]

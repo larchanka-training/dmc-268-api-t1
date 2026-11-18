@@ -34,6 +34,7 @@ from app.api.session import (
     SESSION_COOKIE,
     SESSION_REQUIRED,
     SESSION_RESPONSES,
+    clear_session_cookie,
     current_session,
 )
 from app.application.ports import RunChanges, UnitOfWork
@@ -190,6 +191,7 @@ async def stream_events(
     clock: Callable[[], float] = Depends(get_clock),
 ) -> StreamingResponse:
     token = request.cookies.get(SESSION_COOKIE)
+    had_cookie = SESSION_COOKIE in request.cookies
     connected_at = datetime.now(UTC)
     # Набор видимых — один раз, до потока: сбой провайдера уже стал 502 в зависимости.
     visible = await run_in_threadpool(visible_repository_ids, uow_factory(), repositories)
@@ -212,13 +214,21 @@ async def stream_events(
         alive = await run_in_threadpool(authenticate, untraced_uow_factory(), token, datetime.now(UTC))
         return alive is not None
 
+    def respond(content: Any) -> StreamingResponse:
+        stream = _EventStream(content, media_type="text/event-stream", headers=_HEADERS)
+        # Удаление cookie, которое `current_session` пишет в свой ответ зависимости, в собственный
+        # ответ ручки не попадает: демо с cookie неизвестной сессии удаляет её здесь сам.
+        if demo and had_cookie:
+            clear_session_cookie(stream)
+        return stream
+
     # Подписка — раньше первого чтения: изменение, закоммиченное между ними, придёт
     # сигналом, а не потеряется. Источник недоступен — поток из одной строки `retry`:
     # EventSource переподключится через 3 секунды.
     try:
         changes = await run_changes.subscribe()
     except RunChangesLost:
-        return _EventStream(iter([_RETRY]), media_type="text/event-stream", headers=_HEADERS)
+        return respond(iter([_RETRY]))
     # Первое чтение — до ответа: всё, что оно видит, клиент получит снимком REST после `open`,
     # а изменения после него — событиями.
     opened = open_feed(connected_at)
@@ -238,4 +248,4 @@ async def stream_events(
         finally:
             changes.close()
 
-    return _EventStream(body(), media_type="text/event-stream", headers=_HEADERS)
+    return respond(body())
