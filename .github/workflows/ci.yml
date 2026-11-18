@@ -215,7 +215,7 @@ jobs:
           --base build-base/metrics.json
           --trivy build-summary/trivy.json
           --hadolint build-summary/hadolint.json
-          >> "$GITHUB_STEP_SUMMARY"
+          | tee -a "$GITHUB_STEP_SUMMARY"
       # Базой становится только успешный job image на develop (success()
       # подставился бы и неявно, явно — чтобы читалось). Ключ по sha: запись
       # кэша неизменяема, а restore-keys берёт самую свежую. Метрик нет (упал
@@ -264,14 +264,15 @@ jobs:
       # После проверок, а не сразу после up: у api нет healthcheck, --wait ждёт лишь
       # «running», и запись uvicorn о готовности появляется позже. Шаг идёт и после
       # упавшей проверки, если up успел. Старт API — по меткам Docker (StartedAt и
-      # время записи о готовности), а не по частоте опроса.
+      # время записи о готовности), а не по частоте опроса. tee — чтобы таблица была и
+      # в логе job: summary через API не отдаётся, а базовую линию собирают по логам.
       - name: Холодный старт в summary
         if: ${{ !cancelled() && env.UP_MS != '' }}
         run: |
           docker compose logs --timestamps --no-color --no-log-prefix api > api.log
           python3 scripts/build_summary.py startup --up-ms "$UP_MS" \
             --api-started-at "$(docker inspect -f '{{.State.StartedAt}}' "$(docker compose ps -q api)")" \
-            --api-logs api.log >> "$GITHUB_STEP_SUMMARY"
+            --api-logs api.log | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Состояние и логи при сбое
         if: failure()
         run: |
