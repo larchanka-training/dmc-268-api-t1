@@ -230,8 +230,10 @@ def test_a_run_that_moved_after_the_read_is_skipped_and_the_rest_are_swept(
 REPO_ID = UUID(int=9)
 
 
-def _seed_pull_request(uow: FakeUnitOfWork) -> str:
+def _seed_pull_request(uow: FakeUnitOfWork, *, provider_id: str | None = None) -> str:
     repository = replace(a_repository(), id=REPO_ID)
+    if provider_id is not None:
+        repository = replace(repository, provider_id=provider_id, full_name="demo-org/shop")
     uow.repositories.add(repository)
     uow.merge_requests.add(
         MergeRequest(
@@ -296,6 +298,23 @@ def test_a_swept_run_after_an_earlier_review_blocks_the_head() -> None:
 
     assert vcs.checks == [build_failed_review_check()]
     assert vcs.targets == [(full_name, "sha1", 77)]
+
+
+def test_a_swept_demo_run_does_not_ask_github_for_an_installation() -> None:
+    """Демо-репозитория на GitHub нет (change `demo-mode`): прогон выметается, установку
+    не спрашиваем и gate не ставим."""
+    uow = FakeUnitOfWork()
+    _seed_pull_request(uow, provider_id="demo-1")
+    _reviewed_head(uow, 5)
+    uow.review_runs.add(_run(1, ReviewRunStatus.ANALYSING, timedelta(hours=1)))
+    vcs = RecordingVcsGateway()
+    installations = FakeInstallationCatalog()
+
+    assert _sweep(uow, vcs, installations) == 1
+
+    assert uow.review_runs.get(UUID(int=1)).status is ReviewRunStatus.FAILED  # type: ignore[union-attr]
+    assert installations.calls == []
+    assert vcs.checks == []
 
 
 def test_a_swept_run_on_pause_sets_the_pause_check() -> None:

@@ -17,6 +17,7 @@ from app.application.ports.unit_of_work import RunStateConflict
 from app.application.ports.vcs_gateway import VcsGateway
 from app.application.review_pipeline import block_head_of_failed_run
 from app.application.review_run_steps import close_abandoned_steps
+from app.domain.demo import is_demo_repository
 from app.domain.entities import ReviewRun
 from app.domain.enums import ReviewRunStatus
 from app.domain.lifecycle import advance
@@ -91,7 +92,8 @@ def _block_swept_head(
     """Gate head выметенного прогона, как у упавшего в воркере.
 
     Номер установки был только в сообщении очереди, поэтому он спрашивается у GitHub по
-    репозиторию прогона. Best-effort: сбой GitHub или установка, которой нет, пишется в
+    репозиторию прогона; у демо-репозитория GitHub не спрашивается и gate не ставится.
+    Best-effort: сбой GitHub или установка, которой нет, пишется в
     лог и не прерывает проход; сбой самого check run глотает `block_head_of_failed_run`.
     `False` — GitHub временно недоступен, дальше в проходе к нему не ходить.
     """
@@ -100,7 +102,8 @@ def _block_swept_head(
         with uow:
             merge_request = uow.merge_requests.get(run.merge_request_id)
             repository = uow.repositories.get(merge_request.repository_id) if merge_request else None
-        if repository is None:
+        # Демо-репозитория на GitHub нет, установку не спрашиваем (change `demo-mode`).
+        if repository is None or is_demo_repository(repository):
             return True
         installation_id = installations.repository_installation_id(repository.full_name)
     except VcsTransientError:
