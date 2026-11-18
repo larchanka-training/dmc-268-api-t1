@@ -8,10 +8,13 @@
         --out build-summary/metrics.json
     python3 scripts/build_summary.py render --metrics metrics.json \\
         [--base base.json] [--trivy trivy.json] [--hadolint hadolint.json] \\
-        >> "$GITHUB_STEP_SUMMARY"
+        | tee -a "$GITHUB_STEP_SUMMARY"
     python3 scripts/build_summary.py startup --up-ms 41234 \\
         --api-started-at 2026-11-16T10:00:00.123456789Z --api-logs api.log \\
-        >> "$GITHUB_STEP_SUMMARY"
+        | tee -a "$GITHUB_STEP_SUMMARY"
+
+Вывод — через `tee -a`, а не `>>`: таблица остаётся и в логе job, ведь
+summary шага через API не отдаётся, а базовую линию собирают по логам.
 
 `collect` берёт у `docker image inspect` размер и id образа, а сжатый размер
 считает по потоку `docker save | gzip` — образ целиком в память не читается.
@@ -37,7 +40,6 @@ OpenTelemetry (`container.image.*`), чтобы отправить их в ко�
 
 import argparse
 import json
-import re
 import subprocess
 import sys
 import zlib
@@ -54,8 +56,6 @@ HADOLINT_LEVELS = ("error", "warning", "info", "style")
 
 # Сообщение uvicorn о готовности приложения: lifespan завершился, порт слушается.
 STARTUP_MARK = "Application startup complete."
-# Docker пишет время в RFC 3339 с наносекундами; datetime держит микросекунды.
-_DOCKER_TIME = re.compile(r"^(\S+?T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$")
 
 CHUNK = 1024 * 1024
 NO_METRICS = "Метрики не собраны: образ не собрался или `collect` упал."
@@ -273,19 +273,15 @@ def render(
 def parse_docker_time(value: str) -> datetime | None:
     """Время Docker (`2026-11-16T10:00:00.123456789Z`) или None, если формат чужой.
 
-    Дробная часть обрезается до микросекунд: точнее datetime не хранит.
+    `fromisoformat` с Python 3.11 принимает `Z` и дробную часть любой длины,
+    лишнее после микросекунд отбрасывает. Время без зоны и голая дата — не
+    метка Docker: None.
     """
-    match = _DOCKER_TIME.match(value.strip())
-    if match is None:
-        return None
-    base, fraction, zone = match.groups()
-    micro = f".{fraction[:6]}" if fraction else ""
     try:
-        return datetime.fromisoformat(
-            f"{base}{micro}{'+00:00' if zone == 'Z' else zone}"
-        )
+        parsed = datetime.fromisoformat(value.strip())
     except ValueError:
         return None
+    return parsed if parsed.tzinfo is not None else None
 
 
 def api_startup_seconds(started_at: str, log_lines: Iterable[str]) -> float | None:

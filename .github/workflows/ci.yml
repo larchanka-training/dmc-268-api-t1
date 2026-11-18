@@ -266,12 +266,15 @@ jobs:
       # упавшей проверки, если up успел. Старт API — по меткам Docker (StartedAt и
       # время записи о готовности), а не по частоте опроса. tee — чтобы таблица была и
       # в логе job: summary через API не отдаётся, а базовую линию собирают по логам.
+      # Summary не роняет job: continue-on-error на весь шаг, как у summary в job
+      # image. ps -a — контейнер api мог упасть, а его StartedAt и лог нужны и тогда.
       - name: Холодный старт в summary
         if: ${{ !cancelled() && env.UP_MS != '' }}
+        continue-on-error: true
         run: |
           docker compose logs --timestamps --no-color --no-log-prefix api > api.log
           python3 scripts/build_summary.py startup --up-ms "$UP_MS" \
-            --api-started-at "$(docker inspect -f '{{.State.StartedAt}}' "$(docker compose ps -q api)")" \
+            --api-started-at "$(docker inspect -f '{{.State.StartedAt}}' "$(docker compose ps -a -q api)")" \
             --api-logs api.log | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Состояние и логи при сбое
         if: failure()

@@ -5,7 +5,7 @@
 ## 2. Замер в CI
 
 - [x] 2.1 `.github/workflows/ci.yml`, job `compose-smoke`: метки времени вокруг `docker compose up -d --wait`, старт API по `docker inspect` (`State.StartedAt` → запись uvicorn «Application startup complete.» в логе с метками времени); проверка — в summary прогона на ветке видны обе цифры
-- [x] 2.2 Шаг `python3 scripts/build_summary.py startup … >> "$GITHUB_STEP_SUMMARY"` только при успехе `up`; `actionlint`/`zizmor` зелёные
+- [x] 2.2 Шаг `python3 scripts/build_summary.py startup … | tee -a "$GITHUB_STEP_SUMMARY"` (с `continue-on-error: true`) только при успехе `up`; `actionlint`/`zizmor` зелёные
 
 ## 3. Документация
 

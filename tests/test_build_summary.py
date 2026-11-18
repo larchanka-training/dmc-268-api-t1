@@ -348,7 +348,10 @@ def test_parse_docker_time(value, expected):
     assert parsed.isoformat() == expected
 
 
-@pytest.mark.parametrize("value", ["", "0001-01-01", "вчера", "2026-11-16T10:00:00"])
+@pytest.mark.parametrize(
+    "value",
+    ["", "0001-01-01", "вчера", "2026-11-16T10:00:00", "2026-11-16T10:00:00.123456789"],
+)
 def test_parse_docker_time_rejects_foreign_format(value):
     assert build_summary.parse_docker_time(value) is None
 
