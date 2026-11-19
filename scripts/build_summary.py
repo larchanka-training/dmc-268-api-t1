@@ -54,7 +54,8 @@ SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN")
 TRIVY_GATE = ("CRITICAL", "HIGH")
 HADOLINT_LEVELS = ("error", "warning", "info", "style")
 
-# Сообщение uvicorn о готовности приложения: lifespan завершился, порт слушается.
+# Сообщение uvicorn о готовности приложения: lifespan завершился, сокет uvicorn
+# открывает сразу после.
 STARTUP_MARK = "Application startup complete."
 
 CHUNK = 1024 * 1024
