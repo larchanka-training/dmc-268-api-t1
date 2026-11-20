@@ -205,7 +205,7 @@ tofu apply infra.tfplan
 | `state_passphrase` | секрет `STATE_PASSPHRASE_DMC268_T1` (environment `stand`), не короче 16 символов — фраза шифрования состояния и плана (`encryption.tf`). Нужна уже `tofu init` с бэкендом; копия — вне GitHub (раздел «Шифрование состояния») |
 | `github_webhook_secret` | секрет `WEBHOOK_SECRET_DMC268_T1` |
 | `user_token_encryption_key` | секрет `USER_TOKEN_KEY_DMC268_T1` — 32 байта в base64 (`openssl rand -base64 32`). Без него или с битым значением `apply` падает на проверке переменной: стенд не стартует без шифрования токенов пользователя. Генерация и установка — `README.md`, «Ключ шифрования токенов пользователя» |
-| `public_origin` | переменная `PUBLIC_ORIGIN` — публичный адрес стенда `https://<домен>` (раздел «Публичный адрес стенда»), не IP сервера. С ним API сверяет `Origin` изменяющих запросов, от него строит callback входа `<PUBLIC_ORIGIN>/api/v1/auth/github/callback` (регистрируется в настройках GitHub App) и ссылку из check run. Пустая — шаг «Поднять базу и брокер» (`infra.sh`) падает до первого `plan`; не `https://<хост>` ровно (слеш на конце, путь, порт, `http://`) — `plan` падает на проверке переменной. Локальному `apply` её можно не задавать |
+| `public_origin` | переменная `PUBLIC_ORIGIN` — публичный адрес стенда `https://<домен>`, а пока её нет — `https://` + `VPS_DMC268_IP_T1` (раздел «Публичный адрес стенда»). С ним API сверяет `Origin` изменяющих запросов, от него строит callback входа `<PUBLIC_ORIGIN>/api/v1/auth/github/callback` (регистрируется в настройках GitHub App) и ссылку из check run. Не `https://<хост>` строчными ровно (слеш или точка на конце, путь, порт, заглавные, `http://`) — `plan` падает на проверке переменной; пустое значение (не заданы обе переменные) — шаг «Поднять базу и брокер» (`infra.sh`) падает до первого `plan`. Локальному `apply` её можно не задавать |
 | `docker_host` | `ssh://stand`: хост `stand` в `~/.ssh/config` собирает `.github/actions/stand-ssh` из `VPS_DMC268_U` и `VPS_DMC268_IP_T1` |
 | `bind_ip` | `127.0.0.1`: API снаружи не публикуется, к нему ходит интерфейс изнутри docker-сети |
 | `llm_backend` | `eurorouter` прямо в `deploy.yml` (#245) |
@@ -233,22 +233,40 @@ tofu apply infra.tfplan
 
 Адрес сервиса и адрес сервера — две разные переменные репозитория. `VPS_DMC268_IP_T1` — IP
 сервера: по нему ходит SSH (`.github/actions/stand-ssh`, `db-backup.yml`), его ключ закреплён в
-`.github/ssh/known_hosts`. `PUBLIC_ORIGIN` — публичный адрес сервиса, `https://<домен>` без
-слеша на конце, пути и порта: его получают API и воркер (`public_origin`), Grafana
-(`<PUBLIC_ORIGIN>:8443/grafana/`), проба публичного входа (`PublicEndpointDown`) и строка
-«Адрес» в summary деплоя. Из IP origin больше не собирается (change `public-domain-origin`).
+`.github/ssh/known_hosts`. `PUBLIC_ORIGIN` — публичный адрес сервиса, `https://<домен>`: его
+получают API и воркер (`public_origin`), Grafana (`<PUBLIC_ORIGIN>:8443/grafana/`), проба
+публичного входа (`PublicEndpointDown`) и строка «Адрес» в summary деплоя (change
+`public-domain-origin`). Пока `PUBLIC_ORIGIN` не задана, деплой берёт `https://` +
+`VPS_DMC268_IP_T1` — так же поступает фронт, и стенд работает по IP, как до перехода на домен.
+
+Значение — ровно `https://` + `PUBLIC_HOST` фронта (`dmc-268-ui-t1`), строчными, без слеша и
+точки на конце, пути и порта: браузер присылает `Origin` в нижнем регистре, API сравнивает его
+строкой, и любое расхождение даёт `403 ORIGIN_FORBIDDEN` на каждый изменяющий запрос. Другое
+написание отклоняет проверка переменной `public_origin` на `plan`, до изменений на сервере.
 
 ```bash
 gh variable set PUBLIC_ORIGIN -R larchanka-training/dmc-268-api-t1 --body https://<домен>
 gh variable get PUBLIC_ORIGIN -R larchanka-training/dmc-268-api-t1
 ```
 
-Значение подхватывает следующий деплой (`gh workflow run deploy.yml --ref develop`). Без
-переменной деплой падает на шаге «Поднять базу и брокер» до изменений на сервере, с битым
-форматом — на `plan`.
+Значение подхватывает следующий деплой (`gh workflow run deploy.yml --ref develop`). Удалить
+переменную — вернуться к адресу по IP. Пустой адрес (не заданы ни `PUBLIC_ORIGIN`, ни
+`VPS_DMC268_IP_T1`) `infra.sh` отклоняет до первого `plan`.
 
 **Смена адреса** (переход с IP на домен или на другой домен) затрагивает оба репозитория и
-GitHub App; порядок — из design change `public-domain-origin`:
+GitHub App; порядок — из design change `public-domain-origin`. С шага 2 до шага 4 горит
+критический алерт `PublicEndpointDown` (проба `https_public` по `public_origin` проверяет
+цепочку сертификата): до шага 3 она ходит по старому адресу, а фронт там уже отдаёт
+staging-сертификат домена или перенаправляет на домен, после шага 3 — прямо по домену; staging
+Let's Encrypt проба не доверяет до шага 4. Перед шагом 2 заглушите его на
+время окна и снимите тишину после шага 4 (раздел «Алерты»):
+
+```bash
+ssh stand 'docker exec dmc268-alertmanager amtool silence add alertname=PublicEndpointDown --duration=2h --comment="смена адреса стенда" --alertmanager.url=http://127.0.0.1:9093'
+ssh stand 'docker exec dmc268-alertmanager amtool silence query --alertmanager.url=http://127.0.0.1:9093'
+ssh stand 'docker exec dmc268-alertmanager amtool silence expire <id> --alertmanager.url=http://127.0.0.1:9093'
+```
+
 
 1. DNS: A-запись домена указывает на IP сервера (`VPS_DMC268_IP_T1`); проверка —
    `dig +short <домен>` отдаёт этот IP.
@@ -257,9 +275,11 @@ GitHub App; порядок — из design change `public-domain-origin`:
    `dmc268-ui-acme` не трогаем.
 3. Бэкенд: `gh variable set PUBLIC_ORIGIN --body https://<домен>` и деплой. Между шагами 2 и 3
    изменяющие запросы с нового адреса получают `403 ORIGIN_FORBIDDEN` — окно в минуты.
-4. Фронт переключается на боевой Let's Encrypt.
-5. Админ GitHub App меняет Callback URL на `<PUBLIC_ORIGIN>/api/v1/auth/github/callback` и
-   Webhook URL на `<PUBLIC_ORIGIN>/api/v1/webhooks/github` (`docs/GITHUB_APP.md`).
+4. Фронт переключается на боевой Let's Encrypt; `PublicEndpointDown` гаснет — тишину снять.
+5. Админ GitHub App меняет Callback URL на `<PUBLIC_ORIGIN>/api/v1/auth/github/callback`,
+   Webhook URL на `<PUBLIC_ORIGIN>/api/v1/webhooks/github` и Setup URL на
+   `<PUBLIC_ORIGIN>/api/v1/auth/github/setup` с включённым «Redirect on update»
+   (`docs/GITHUB_APP.md`, таблица настроек App).
 
 Проверка после выкатки — `docs/testing/RELEASE_SMOKE.md`, SM-04, SM-13 и SM-21 по новому
 адресу; вход через GitHub работает, в Recent Deliveries App — `2xx`.
