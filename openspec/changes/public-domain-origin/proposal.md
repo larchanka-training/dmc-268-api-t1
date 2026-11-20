@@ -8,9 +8,9 @@
 
 - `.github/workflows/deploy.yml`: `TF_VAR_public_origin` и `PUBLIC_ORIGIN` job'а берутся из новой переменной репозитория `PUBLIC_ORIGIN` (`https://<домен>`), а пока её нет — `https://` + `VPS_DMC268_IP_T1`, симметрично фронту. Без этого изменяющие запросы с нового адреса получат `403 ORIGIN_FORBIDDEN`. SSH-шаги продолжают ходить по IP.
 - `infra/variables.tf`: проверка формата `public_origin` — пусто (локальный apply) или `https://<хост>` строчными (домен или IPv4) без порта, слеша и точки на конце, пути; `plan` с другим значением падает до изменений на сервере. `infra/locals.tf`: `trimsuffix` у адреса Grafana убран — слеша на конце больше не бывает.
-- `.github/scripts/deploy/infra.sh`: защита — пустой адрес стенда (не заданы обе переменные) роняет шаг до первого `plan`.
+- `.github/scripts/deploy/infra.sh`: защита — адрес стенда без хоста (не заданы обе переменные, выражение даёт `https://`, или пустая строка без `deploy.yml`) роняет шаг до `plan` и `apply`.
 - Summary деплоя: строка «Адрес» — `<PUBLIC_ORIGIN>/api/v1/`, а не `https://<IP>/api/v1/` (`scripts/deploy_report.py`).
-- Тесты: `tofu test` на формат `public_origin` (домен и IP проходят; слеш, путь, `http://`, порт, заглавные, точка на конце — отказ), `tests/test_deploy_report.py` — `infra.sh` с пустым адресом и строка «Адрес» в summary.
+- Тесты: `tofu test` на формат `public_origin` (домен и IP проходят; слеш, путь, `http://`, порт, заглавные, точка на конце — отказ), `tests/test_deploy_report.py` — `infra.sh` с пустым адресом и `https://` и строка «Адрес» в summary.
 - GitHub App (делает админ App): callback `https://<домен>/api/v1/auth/github/callback`, webhook URL `https://<домен>/api/v1/webhooks/github`, Setup URL `https://<домен>/api/v1/auth/github/setup` с «Redirect on update».
 - Документация: `62.169.24.237` в `docs/GITHUB_APP.md`, `docs/testing/RELEASE_SMOKE.md`, `infra/README.md` заменяется ссылкой на `PUBLIC_ORIGIN`; в `infra/README.md` — раздел «Публичный адрес стенда» с переменной и порядком выкатки. Где речь о сервере, а не об адресе сервиса, IP остаётся.
 - Порядок выкатки согласуется с `dmc-268-ui-t1` (убрать `profile shortlived require;`, домен в `PUBLIC_HOST`).

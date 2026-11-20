@@ -240,17 +240,19 @@ def test_targeted_plan_with_a_new_database_password_is_rejected(tmp_path: Path) 
     assert not list((root / "infra").glob("*tfplan*"))
 
 
-def test_targeted_plan_without_public_origin_is_not_built(tmp_path: Path) -> None:
-    """Change public-domain-origin: пустой адрес стенда роняет шаг до первого вызова tofu.
+@pytest.mark.parametrize("origin", ["", "https://"])
+def test_targeted_plan_without_public_origin_is_not_built(tmp_path: Path, origin: str) -> None:
+    """Change public-domain-origin: адрес стенда без хоста роняет шаг до первого вызова tofu.
 
-    В CI адрес не пуст (PUBLIC_ORIGIN или https://<IP>), проверка — защита.
-    Переменная public_origin пропускает пустую строку ради локального apply,
-    а стенд с пустой отвечал бы 403 на каждый изменяющий запрос.
+    Без PUBLIC_ORIGIN и VPS_DMC268_IP_T1 выражение deploy.yml даёт `https://`,
+    скрипт без deploy.yml — пустую строку. Переменная public_origin пропускает
+    пустую ради локального apply, а стенд без адреса отвечал бы 403 на каждый
+    изменяющий запрос.
     """
-    result, _, _ = run_script(tmp_path, "infra.sh", plan="plan-infra-no-changes.json", TF_VAR_public_origin="")
+    result, _, _ = run_script(tmp_path, "infra.sh", plan="plan-infra-no-changes.json", TF_VAR_public_origin=origin)
 
     assert result.returncode != 0
-    assert "::error::публичный адрес стенда пуст" in result.stdout
+    assert "::error::публичный адрес стенда без хоста" in result.stdout
     assert not (tmp_path / "calls").exists()
 
 

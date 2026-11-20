@@ -310,9 +310,10 @@ jobs:
           # переменная репозитория PUBLIC_ORIGIN (https://<домен>), а пока её
           # нет — https://<VPS_DMC268_IP_T1>, как у фронта (change
           # public-domain-origin, D1). С ним API сверяет Origin, от него строит
-          # callback входа и ссылку из check run. Битый формат ловит проверка
-          # переменной в infra/variables.tf на plan; пустое значение (нет обеих
-          # переменных) — infra.sh до первого plan.
+          # callback входа и ссылку из check run. Нет обеих переменных —
+          # выражение даёт `https://` без хоста, его infra.sh отклоняет до plan
+          # и apply; остальной битый формат ловит проверка переменной в
+          # infra/variables.tf на plan.
           TF_VAR_public_origin: ${{ vars.PUBLIC_ORIGIN || format('https://{0}', vars.VPS_DMC268_IP_T1) }}
           TF_VAR_api_image: ${{ needs.image.outputs.image }}
           TF_VAR_postgres_password: ${{ secrets.PG_PASSWORD_DMC268_T1 }}

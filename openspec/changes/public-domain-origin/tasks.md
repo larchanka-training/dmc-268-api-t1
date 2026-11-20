@@ -4,7 +4,7 @@
 
 ## 2. Деплой бэкенда
 
-- [x] 2.1 `.github/workflows/deploy.yml`: `TF_VAR_public_origin` и `PUBLIC_ORIGIN` job'а — `vars.PUBLIC_ORIGIN`, без неё `https://` + `VPS_DMC268_IP_T1` (design D1); формат — `validation` в `infra/variables.tf`, пустое значение — защита в `infra.sh`; проверка — `tofu test` (домен и IP проходят, битые форматы — отказ), pytest `test_targeted_plan_without_public_origin_is_not_built`, `zizmor` зелёный (`actionlint` локально не запускался — проверит CI)
+- [x] 2.1 `.github/workflows/deploy.yml`: `TF_VAR_public_origin` и `PUBLIC_ORIGIN` job'а — `vars.PUBLIC_ORIGIN`, без неё `https://` + `VPS_DMC268_IP_T1` (design D1); формат — `validation` в `infra/variables.tf`, адрес без хоста (`https://` или пусто) — защита в `infra.sh`; проверка — `tofu test` (домен и IP проходят, битые форматы — отказ), pytest `test_targeted_plan_without_public_origin_is_not_built`, `zizmor` зелёный (`actionlint` локально не запускался — проверит CI)
 - [ ] 2.2 `gh variable set PUBLIC_ORIGIN --body https://<домен>` после деплоя фронта на staging LE (порядок — design D2); проверка — изменяющий запрос с нового origin не получает `403 ORIGIN_FORBIDDEN`
 
 ## 3. GitHub App и документация
