@@ -979,43 +979,89 @@ api, worker, копии, replication-setup — и 9 наблюдаемости) 
 
 ```bash
 ssh stand 'docker ps -a --filter name=dmc268- --format "{{.Names}} {{.Status}}"'
-ssh stand 'docker logs --since 15m dmc268-api'
-ssh stand 'docker logs --since 15m dmc268-worker'      # и dmc268-worker-2 … по worker_replicas
-ssh stand 'docker logs --since 15m dmc268-ui'
-ssh stand 'docker logs --since 15m dmc268-postgres'
-ssh stand 'docker logs --since 15m dmc268-rabbitmq'
-ssh stand 'docker logs --since 15m dmc268-otelcol'     # если в Loki пусто
+ssh stand 'docker logs --since 15m dmc268-api 2>&1'
+ssh stand 'docker logs --since 15m dmc268-worker 2>&1'      # и dmc268-worker-2 … по worker_replicas
+ssh stand 'docker logs --since 15m dmc268-ui 2>&1'
+ssh stand 'docker logs --since 15m dmc268-postgres 2>&1'
+ssh stand 'docker logs --since 15m dmc268-rabbitmq 2>&1'
+ssh stand 'docker logs --since 15m dmc268-otelcol 2>&1'     # если в Loki пусто
 ```
+
+`2>&1` обязателен: трейсбек до настройки логирования, postgres и otelcol пишут в stderr.
 
 Остальные контейнеры стека — `dmc268-postgres-replica`, `dmc268-postgres-backup`,
 `dmc268-otelcol-docker`, `dmc268-otelcol-logs`, `dmc268-loki`, `dmc268-tempo`,
 `dmc268-prometheus`, `dmc268-grafana`, `dmc268-alertmanager`, `dmc268-blackbox`,
 `dmc268-blackbox-public`, `dmc268-node-exporter`, `dmc268-docker-proxy` — тем же
-`docker logs`. Логи сохранить до перезапуска: `ssh stand 'docker logs --since 1h dmc268-api' > api.log`.
+`docker logs`. `docker restart` логи `json-file` не теряет, теряет пересоздание контейнера — логи
+сохранить до пересоздания или деплоя: `ssh stand 'docker logs --since 1h dmc268-api 2>&1' > api.log`.
 
-**4. Поднять приложение.** Перезапускаем только контейнеры приложения — `docker restart`, а не
+**4. Поднять приложение.** Перезапускаем контейнеры — `docker restart`, а не
 деплой: состояние OpenTofu и тома не меняются, а план деплоя строится минутами.
 
 ```bash
-ssh stand 'docker restart dmc268-api'      # stop_timeout 15 с, потом SIGKILL
-ssh stand 'docker restart dmc268-worker'   # ждёт, пока воркер доработает сообщение (stop_timeout — worker_stop_seconds в locals.tf)
+ssh stand 'docker restart dmc268-api'            # stop_timeout 15 с, потом SIGKILL
+ssh stand 'docker restart -t 30 dmc268-worker'   # 30 с, потом SIGKILL; и dmc268-worker-2 …
 ssh stand 'docker inspect -f {{.State.Health.Status}} dmc268-api'   # ждём healthy
 ```
 
-`dmc268-postgres` и `dmc268-rabbitmq` во время демо **не трогаем**: ни `docker rm`, ни
-пересоздание, ни правку их блока в `infra/`. Их замена — только ручной деплой с
-`allow_stateful_replace=true` («Деплой»), тома не меняются никогда. Если упали именно они —
-`docker logs` из шага 3, а не пересоздание; `restart = "unless-stopped"` поднимает их сам.
+`-t 30` у воркера обязателен. Без него `docker restart` ждёт `stop_timeout` воркера —
+`worker_stop_seconds` в `locals.tf`, 1260 с, с hosted-фоллбэком 2460 с, — а воркер перезапускают
+как раз зависшим, обычно в вызове модели, и `ssh` висит до 21–41 минуты. Цена `-t 30`: прерванный
+прогон остаётся в работе, повторно доставленное сообщение воркер подтверждает и отбрасывает
+(«прогон уже в работе»), а очистка переведёт прогон в `failed` только через
+`stale_run_timeout_seconds` — 30 минут. Поэтому после такого перезапуска ревью в демо-PR
+запускаем заново — новым коммитом.
+
+**База и брокер.** `restart = "unless-stopped"` поднимает только вышедший процесс, а зависший или
+`unhealthy` контейнер так и остаётся. Если легли `dmc268-postgres` или `dmc268-rabbitmq` — сначала
+логи из шага 3, потом `docker restart`: это тот же контейнер с тем же томом, данные не теряются.
+
+```bash
+ssh stand 'docker restart dmc268-postgres'
+ssh stand 'docker restart dmc268-rabbitmq'
+```
+
+Опасно и во время демо запрещено: `docker rm`, любые `docker volume …`, `docker system prune
+--volumes` и деплой с правкой их блока в `infra/`. Замена базы и брокера — только ручной деплой с
+`allow_stateful_replace=true` («Деплой»), тома не меняются никогда.
+
+Перезапуском не лечатся (раздел «Алерты»): `DiskSpaceCritical` — место на диске, кто растёт —
+`ssh stand 'docker system df -v'`; `LlmProviderCircuitOpen` — провайдер модели не отвечает, прогоны
+идут через фоллбэк, смотреть `review_circuit_breaker_state` и логи воркера по провайдеру;
+`LlmBudgetExceeded` — исчерпан месячный бюджет токенов, лечится только сменой бюджета.
 
 **5. Вебхуки.** Прогон по PR начинается с доставки вебхука на
 `<PUBLIC_ORIGIN>/api/v1/webhooks/github` (настройки App — [`docs/GITHUB_APP.md`](../docs/GITHUB_APP.md)):
 
 - администратор App: настройки GitHub App → Advanced → Recent Deliveries — у доставки
-  `pull_request` ответ `202`; `401` — не совпал secret (`WEBHOOK_SECRET_DMC268_T1`), ошибка
-  соединения — неверный Webhook URL или лежит вход;
+  `pull_request` с action `opened` или `synchronize` ответ `202` **и `id` прогона в теле** (как
+  в SM-20). `closed`, `labeled` и прочие действия — штатный `202` `ignored`. Одного `202` мало:
+  - `{"status": "ignored"}` — тоже `202`, но прогона нет: репозиторий не подключён или на паузе,
+    авторевью выключено, автор PR не доверенный, ветка вне фильтра — настройки репозитория в
+    кабинете;
+  - `401` — не совпал secret (`WEBHOOK_SECRET_DMC268_T1`);
+  - `502` — не ответил GitHub, доставку переотправить позже (Redeliver);
+  - `500` — брокер или база, шаг 1;
+  - ошибка соединения — неверный Webhook URL или лежит вход;
 - без доступа к настройкам App: открыть PR в демо-репозитории и найти прогон в кабинете или в
   `GET /api/v1/reviews`; нет прогона за минуту — вебхук не дошёл, его доставки смотрит
   администратор App.
+
+**6. План Б.** Стенд не поднялся за 10 минут — показываем локально, без стенда и без GitHub App:
+
+```bash
+cp -n .env.example .env && docker compose up -d --wait   # -n: свой .env не затирать
+```
+
+Если `.env` уже был — в нём должен стоять `DEMO_MODE=true`. `--wait` не ждёт `seed`: первые
+секунды кабинет пуст или отвечает `401` — обновить страницу.
+
+`.env.example` включает `DEMO_MODE=true`: сервис `seed` записывает демо-данные, и кабинет на
+`localhost:8080` показывает репозитории, прогоны и находки без входа. Демо — только чтение;
+ограничения и время холодного старта — корневой [`README.md`](../README.md), «Демо-режим».
+Образы собрать заранее, `docker compose build`: образ `ui` собирается из репозитория на GitHub
+и без сети не соберётся.
 
 Перед демо раздел проходят по чек-листу [`docs/testing/RELEASE_SMOKE.md`](../docs/testing/RELEASE_SMOKE.md), шаг SM-63.
 
