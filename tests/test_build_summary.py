@@ -323,3 +323,110 @@ def test_cli_collect_fails_without_writing_metrics(tmp_path, fake_docker, broken
     assert r.returncode == 1
     assert "Traceback" not in r.stderr
     assert not out.exists()
+
+
+# --- холодный старт -------------------------------------------------------
+
+STARTED = "2026-11-16T10:00:00.250000000Z"
+
+
+def log_line(stamp: str, message: str) -> str:
+    return f'{stamp} {{"severity": "INFO", "message": "{message}"}}'
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("2026-11-16T10:00:00.123456789Z", "2026-11-16T10:00:00.123456+00:00"),
+        ("2026-11-16T10:00:00Z", "2026-11-16T10:00:00+00:00"),
+        ("2026-11-16T13:00:00.5+03:00", "2026-11-16T13:00:00.500000+03:00"),
+    ],
+)
+def test_parse_docker_time(value, expected):
+    parsed = build_summary.parse_docker_time(value)
+    assert parsed is not None
+    assert parsed.isoformat() == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "0001-01-01", "вчера", "2026-11-16T10:00:00", "2026-11-16T10:00:00.123456789"],
+)
+def test_parse_docker_time_rejects_foreign_format(value):
+    assert build_summary.parse_docker_time(value) is None
+
+
+def test_api_startup_seconds_from_first_mark_after_start():
+    lines = [
+        # Прошлый запуск контейнера: до StartedAt, не считается.
+        log_line("2026-11-16T09:59:00.000000000Z", build_summary.STARTUP_MARK),
+        log_line("2026-11-16T10:00:01.000000000Z", "Started server process [1]"),
+        log_line("2026-11-16T10:00:03.750000000Z", build_summary.STARTUP_MARK),
+        log_line("2026-11-16T10:00:09.000000000Z", build_summary.STARTUP_MARK),
+    ]
+    assert build_summary.api_startup_seconds(STARTED, lines) == 3.5
+
+
+@pytest.mark.parametrize(
+    ("started_at", "lines"),
+    [
+        (
+            STARTED,
+            [log_line("2026-11-16T10:00:01Z", "Waiting for application startup.")],
+        ),
+        (STARTED, ["без метки времени " + build_summary.STARTUP_MARK]),
+        ("", [log_line("2026-11-16T10:00:01Z", build_summary.STARTUP_MARK)]),
+    ],
+)
+def test_api_startup_seconds_unknown(started_at, lines):
+    assert build_summary.api_startup_seconds(started_at, lines) is None
+
+
+def test_render_startup():
+    expected = (
+        "## Холодный старт\n"
+        "\n"
+        "Чистый раннер: образы собираются и скачиваются заново. Цифры информационные, "
+        "порога нет — раннеры GitHub шумят.\n"
+        "\n"
+        "| Что | Ключ | Значение |\n"
+        "|---|---|---|\n"
+        "| `docker compose up -d --wait` — сборка, скачивание, все сервисы готовы "
+        "| `dmc268.build.startup.compose` | 41.2 с |\n"
+        "| API: запуск контейнера → «Application startup complete.» "
+        "| `dmc268.build.startup.api` | 3.5 с |\n"
+    )
+    assert build_summary.render_startup(41.234, 3.5) == expected
+
+
+def test_render_startup_without_values_shows_dash():
+    md = build_summary.render_startup(None, None)
+    assert "| `dmc268.build.startup.compose` | — |" in md
+    assert "| `dmc268.build.startup.api` | — |" in md
+
+
+def test_cli_startup(tmp_path):
+    logs = tmp_path / "api.log"
+    logs.write_text(
+        log_line("2026-11-16T10:00:03.750000000Z", build_summary.STARTUP_MARK) + "\n",
+        encoding="utf-8",
+    )
+    r = run_cli(
+        "startup",
+        "--up-ms", "41234",
+        "--api-started-at", STARTED,
+        "--api-logs", str(logs),
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == build_summary.render_startup(41.234, 3.5) + "\n"
+
+
+def test_cli_startup_without_logs_does_not_fail(tmp_path):
+    r = run_cli(
+        "startup",
+        "--up-ms", "1000",
+        "--api-started-at", STARTED,
+        "--api-logs", str(tmp_path / "нет.log"),
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == build_summary.render_startup(1.0, None) + "\n"
