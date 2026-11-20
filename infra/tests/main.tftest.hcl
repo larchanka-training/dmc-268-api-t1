@@ -740,8 +740,9 @@ run "api_image_without_digest_rejected" {
 }
 
 # Публичный адрес стенда (change public-domain-origin): origin браузера —
-# https://<хост> ровно, иначе Origin изменяющих запросов не совпадёт ни разу и
-# API ответит 403, а Grafana склеит свой :8443 с чужим портом. Пустой —
+# https://<хост> строчными ровно, иначе Origin изменяющих запросов не совпадёт
+# ни разу и API ответит 403, а Grafana склеит свой :8443 с чужим портом. IP
+# сервера — запасное значение deploy.yml, пока PUBLIC_ORIGIN не задана. Пустой —
 # локальный apply, его пропускает переменная; стенду пустой не даёт infra.sh.
 run "public_origin_with_domain_passes" {
   command = plan
@@ -791,6 +792,39 @@ run "public_origin_with_port_rejected" {
 
   variables {
     public_origin = "https://review.example:8443"
+  }
+
+  expect_failures = [var.public_origin]
+}
+
+run "public_origin_with_server_ip_passes" {
+  command = plan
+
+  variables {
+    public_origin = "https://62.169.24.237"
+  }
+
+  assert {
+    condition     = contains(docker_container.api.env, "PUBLIC_ORIGIN=https://62.169.24.237")
+    error_message = "IP сервера — запасной public_origin deploy.yml, пока PUBLIC_ORIGIN не задана: проверка его пропускает."
+  }
+}
+
+run "public_origin_in_upper_case_rejected" {
+  command = plan
+
+  variables {
+    public_origin = "https://Review.example"
+  }
+
+  expect_failures = [var.public_origin]
+}
+
+run "public_origin_with_trailing_dot_rejected" {
+  command = plan
+
+  variables {
+    public_origin = "https://review.example."
   }
 
   expect_failures = [var.public_origin]

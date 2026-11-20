@@ -24,19 +24,22 @@
 # идёт только трубой — как в plan.sh.
 #
 # Нужны: учётные данные хранилища состояния и TF_VAR_* — те же, что у полного
-# apply (якорь *tofu-env в deploy.yml), среди них непустой TF_VAR_public_origin. Параметры (env): REPORT_DIR — каталог
+# apply (якорь *tofu-env в deploy.yml), среди них непустой
+# TF_VAR_public_origin. Параметры (env): REPORT_DIR — каталог
 # отчёта, по умолчанию $RUNNER_TEMP/deploy-report; ALLOW_STATEFUL_REPLACE
 # (`true` — разрешить замену базы и брокера) и DEPLOY_ACTOR — для сторожа.
 set -euo pipefail
 
-# Публичный адрес стенда — переменная репозитория PUBLIC_ORIGIN (change
-# public-domain-origin). infra/variables.tf пропускает пустой public_origin:
-# локальный apply живёт без него. Стенду пустой не годится — API отклонил бы
-# каждый изменяющий запрос `403 ORIGIN_FORBIDDEN`, а вход сломался бы на
-# callback. Поэтому пустой отклоняется здесь, до первого plan; формат
-# (https://<хост> без / и пути) проверяет сама переменная.
+# Публичный адрес стенда (change public-domain-origin). deploy.yml берёт его
+# из переменной репозитория PUBLIC_ORIGIN, а без неё — https://<IP сервера>,
+# так что в CI пустым он не приходит. Проверка — защита на случай, когда
+# пусты обе переменные или скрипт запущен без deploy.yml:
+# infra/variables.tf пустой public_origin пропускает (локальный apply живёт
+# без него), а стенд с пустым отвечал бы `403 ORIGIN_FORBIDDEN` на каждый
+# изменяющий запрос. Формат (https://<хост> строчными) проверяет сама
+# переменная на plan.
 if [[ -z "${TF_VAR_public_origin:-}" ]]; then
-  echo "::error::PUBLIC_ORIGIN не задана: адрес стенда — gh variable set PUBLIC_ORIGIN --body https://<домен> (infra/README.md, «Публичный адрес стенда»); на сервере ничего не менял"
+  echo "::error::публичный адрес стенда пуст: не заданы ни PUBLIC_ORIGIN, ни VPS_DMC268_IP_T1 (infra/README.md, «Публичный адрес стенда»). Шаг остановлен до plan, на сервере ничего не менялось"
   exit 1
 fi
 

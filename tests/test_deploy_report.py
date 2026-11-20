@@ -241,15 +241,16 @@ def test_targeted_plan_with_a_new_database_password_is_rejected(tmp_path: Path) 
 
 
 def test_targeted_plan_without_public_origin_is_not_built(tmp_path: Path) -> None:
-    """Change public-domain-origin: без PUBLIC_ORIGIN шаг падает до первого вызова tofu.
+    """Change public-domain-origin: пустой адрес стенда роняет шаг до первого вызова tofu.
 
+    В CI адрес не пуст (PUBLIC_ORIGIN или https://<IP>), проверка — защита.
     Переменная public_origin пропускает пустую строку ради локального apply,
     а стенд с пустой отвечал бы 403 на каждый изменяющий запрос.
     """
     result, _, _ = run_script(tmp_path, "infra.sh", plan="plan-infra-no-changes.json", TF_VAR_public_origin="")
 
     assert result.returncode != 0
-    assert "::error::PUBLIC_ORIGIN не задана" in result.stdout
+    assert "::error::публичный адрес стенда пуст" in result.stdout
     assert not (tmp_path / "calls").exists()
 
 
