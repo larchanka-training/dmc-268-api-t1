@@ -161,10 +161,21 @@ variable "user_token_encryption_key" {
   }
 }
 
+# Публичный адрес стенда: на стенде — переменная репозитория PUBLIC_ORIGIN
+# (deploy.yml), домен, а не IP сервера (change public-domain-origin). Origin
+# браузера — схема и хост без / и пути, сравнение строгое: со слешем или путём
+# не совпал бы ни один запрос. Порта тоже нет: Grafana дописывает к хосту
+# свой :8443 (local.grafana_public_root_url). Пустой пропускается — локальный
+# apply живёт без него; стенду пустой не даёт .github/scripts/deploy/infra.sh.
 variable "public_origin" {
   type        = string
-  description = "Публичный origin интерфейса без завершающего / (PUBLIC_ORIGIN): сверка Origin, callback входа и ссылка из check run на прогон. Пустой — изменяющие запросы с сессией получают 403, check run без ссылки."
+  description = "Публичный origin интерфейса https://<хост> без порта, завершающего / и пути (PUBLIC_ORIGIN): сверка Origin, callback входа и ссылка из check run на прогон. Пустой — изменяющие запросы с сессией получают 403, check run без ссылки."
   default     = ""
+
+  validation {
+    condition     = var.public_origin == "" || can(regex("^https://[^/?#@:[:space:]]+$", var.public_origin))
+    error_message = "public_origin — https://<хост> без порта, завершающего / и пути (например https://review.example): переменная репозитория PUBLIC_ORIGIN битая."
+  }
 }
 
 variable "github_webhook_secret" {

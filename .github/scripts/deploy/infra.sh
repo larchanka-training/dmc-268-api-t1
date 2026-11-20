@@ -24,10 +24,21 @@
 # идёт только трубой — как в plan.sh.
 #
 # Нужны: учётные данные хранилища состояния и TF_VAR_* — те же, что у полного
-# apply (якорь *tofu-env в deploy.yml). Параметры (env): REPORT_DIR — каталог
+# apply (якорь *tofu-env в deploy.yml), среди них непустой TF_VAR_public_origin. Параметры (env): REPORT_DIR — каталог
 # отчёта, по умолчанию $RUNNER_TEMP/deploy-report; ALLOW_STATEFUL_REPLACE
 # (`true` — разрешить замену базы и брокера) и DEPLOY_ACTOR — для сторожа.
 set -euo pipefail
+
+# Публичный адрес стенда — переменная репозитория PUBLIC_ORIGIN (change
+# public-domain-origin). infra/variables.tf пропускает пустой public_origin:
+# локальный apply живёт без него. Стенду пустой не годится — API отклонил бы
+# каждый изменяющий запрос `403 ORIGIN_FORBIDDEN`, а вход сломался бы на
+# callback. Поэтому пустой отклоняется здесь, до первого plan; формат
+# (https://<хост> без / и пути) проверяет сама переменная.
+if [[ -z "${TF_VAR_public_origin:-}" ]]; then
+  echo "::error::PUBLIC_ORIGIN не задана: адрес стенда — gh variable set PUBLIC_ORIGIN --body https://<домен> (infra/README.md, «Публичный адрес стенда»); на сервере ничего не менял"
+  exit 1
+fi
 
 export REPORT_DIR="${REPORT_DIR:-${RUNNER_TEMP:-/tmp}/deploy-report}"
 # Модель Eurorouter — одна на стенд и eval: файл .github/eurorouter-model, а

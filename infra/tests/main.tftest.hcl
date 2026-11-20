@@ -738,3 +738,60 @@ run "api_image_without_digest_rejected" {
 
   expect_failures = [var.api_image]
 }
+
+# Публичный адрес стенда (change public-domain-origin): origin браузера —
+# https://<хост> ровно, иначе Origin изменяющих запросов не совпадёт ни разу и
+# API ответит 403, а Grafana склеит свой :8443 с чужим портом. Пустой —
+# локальный apply, его пропускает переменная; стенду пустой не даёт infra.sh.
+run "public_origin_with_domain_passes" {
+  command = plan
+
+  variables {
+    public_origin = "https://review.example"
+  }
+
+  assert {
+    condition     = contains(docker_container.api.env, "PUBLIC_ORIGIN=https://review.example")
+    error_message = "API получает PUBLIC_ORIGIN ровно таким, как задан."
+  }
+}
+
+run "public_origin_with_trailing_slash_rejected" {
+  command = plan
+
+  variables {
+    public_origin = "https://review.example/"
+  }
+
+  expect_failures = [var.public_origin]
+}
+
+run "public_origin_with_path_rejected" {
+  command = plan
+
+  variables {
+    public_origin = "https://review.example/app"
+  }
+
+  expect_failures = [var.public_origin]
+}
+
+run "public_origin_over_http_rejected" {
+  command = plan
+
+  variables {
+    public_origin = "http://review.example"
+  }
+
+  expect_failures = [var.public_origin]
+}
+
+run "public_origin_with_port_rejected" {
+  command = plan
+
+  variables {
+    public_origin = "https://review.example:8443"
+  }
+
+  expect_failures = [var.public_origin]
+}

@@ -589,8 +589,8 @@ def render(report_dir: Path, env: dict[str, str]) -> str:
         out.append(f"| Тег | `container.image.tags` | `{tag}` |")
     if digest:
         out.append(f"| Digest | `container.image.repo_digests` | `{name}@{digest}` |")
-    if env.get("HOST"):
-        out.append(f"| Адрес | | https://{env['HOST']}/api/v1/ |")
+    if env.get("PUBLIC_ORIGIN"):
+        out.append(f"| Адрес | | {env['PUBLIC_ORIGIN'].rstrip('/')}/api/v1/ |")
     if "start" in marks and SUMMARY_MARK in marks:
         out.append(
             f"| Длительность job'а, с | `dmc268.deploy.duration` | {seconds(marks[SUMMARY_MARK] - marks['start'])} |"
