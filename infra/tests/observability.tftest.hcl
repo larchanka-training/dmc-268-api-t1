@@ -407,8 +407,8 @@ run "stack_networks_and_grafana_port_follow_their_purpose" {
 
 # Публичный вход в Grafana (change grafana-public-access): root_url из
 # public_origin на порту 8443 (свой origin, отдельно от кабинета) с подпутём
-# /grafana/ — и для origin со слешем на конце, —
-# отдача из подпути и cookie только по HTTPS; анонимный вход и регистрация
+# /grafana/ (слеша на конце у public_origin не бывает — его не пускает
+# проверка переменной, main.tftest.hcl), отдача из подпути и cookie только по HTTPS; анонимный вход и регистрация
 # по-прежнему выключены. /metrics и basic auth выключены: подпуть открыт
 # наружу, а basic auth обходит limit_req на /grafana/login. Версия без входа
 # скрыта, публичные дашборды и снимки выключены — иначе панели с логами и
@@ -420,13 +420,13 @@ run "grafana_serves_public_entry_sub_path" {
     observability_enabled     = true
     grafana_admin_password    = "grafana-admin"
     postgres_monitor_password = "monitor-password"
-    public_origin             = "https://203.0.113.10/"
+    public_origin             = "https://review.example"
   }
 
   assert {
     condition = alltrue([
       for e in [
-        "GF_SERVER_ROOT_URL=https://203.0.113.10:8443/grafana/",
+        "GF_SERVER_ROOT_URL=https://review.example:8443/grafana/",
         "GF_SERVER_SERVE_FROM_SUB_PATH=true",
         "GF_SECURITY_COOKIE_SECURE=true",
         "GF_AUTH_ANONYMOUS_ENABLED=false",
@@ -439,7 +439,7 @@ run "grafana_serves_public_entry_sub_path" {
         "GF_SNAPSHOTS_EXTERNAL_ENABLED=false",
       ] : contains(docker_container.grafana[0].env, e)
     ])
-    error_message = "Grafana: GF_SERVER_ROOT_URL = public_origin без слеша + :8443/grafana/, GF_SERVER_SERVE_FROM_SUB_PATH=true, GF_SECURITY_COOKIE_SECURE=true, анонимный вход, регистрация, /metrics, basic auth, публичные дашборды и снимки выключены, версия скрыта."
+    error_message = "Grafana: GF_SERVER_ROOT_URL = public_origin + :8443/grafana/, GF_SERVER_SERVE_FROM_SUB_PATH=true, GF_SECURITY_COOKIE_SECURE=true, анонимный вход, регистрация, /metrics, basic auth, публичные дашборды и снимки выключены, версия скрыта."
   }
 }
 

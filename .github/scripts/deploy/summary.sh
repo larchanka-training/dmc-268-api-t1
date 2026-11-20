@@ -13,7 +13,7 @@
 # Нужен хост `stand` в ~/.ssh/config (.github/actions/stand-ssh). Параметры
 # (env): REPORT_DIR — каталог отчёта (по умолчанию $RUNNER_TEMP/deploy-report),
 # GITHUB_STEP_SUMMARY и для render — STEP_RESULTS, JOB_STATUS,
-# IMAGE, SHA, HOST.
+# IMAGE, SHA, PUBLIC_ORIGIN.
 set -uo pipefail
 
 export REPORT_DIR="${REPORT_DIR:-${RUNNER_TEMP:-/tmp}/deploy-report}"

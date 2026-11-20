@@ -140,6 +140,7 @@ def run_script(
             "PLAN_JSON": str((FIXTURES / plan).resolve()),
             "FIX": str(FIXTURES.resolve()),
             "DF": GNU_DF,
+            "TF_VAR_public_origin": "https://review.example",
             **env,
         },
     )
@@ -237,6 +238,22 @@ def test_targeted_plan_with_a_new_database_password_is_rejected(tmp_path: Path) 
     assert plan["changes"] == {"docker_container": {"replace": 1}}
     # Файла отклонённого плана с паролями не остаётся.
     assert not list((root / "infra").glob("*tfplan*"))
+
+
+@pytest.mark.parametrize("origin", ["", "https://"])
+def test_targeted_plan_without_public_origin_is_not_built(tmp_path: Path, origin: str) -> None:
+    """Change public-domain-origin: адрес стенда без хоста роняет шаг до первого вызова tofu.
+
+    Без PUBLIC_ORIGIN и VPS_DMC268_IP_T1 выражение deploy.yml даёт `https://`,
+    скрипт без deploy.yml — пустую строку. Переменная public_origin пропускает
+    пустую ради локального apply, а стенд без адреса отвечал бы 403 на каждый
+    изменяющий запрос.
+    """
+    result, _, _ = run_script(tmp_path, "infra.sh", plan="plan-infra-no-changes.json", TF_VAR_public_origin=origin)
+
+    assert result.returncode != 0
+    assert "::error::публичный адрес стенда без хоста" in result.stdout
+    assert not (tmp_path / "calls").exists()
 
 
 def test_targeted_plan_without_changes_is_applied_as_checked(tmp_path: Path) -> None:
@@ -883,6 +900,20 @@ def test_summary_warns_about_api_and_worker_after_an_app_role_password_change(tm
     assert "Сменены в этом деплое: роль приложения (`dmc268_app`)." in text
     assert "> [!WARNING]\n> Пароль сменён, а API и воркер не заменены" in text
     assert "`postgres-backup`" not in text.split("### Пароли")[1].split("### Простой API")[0]
+
+
+def test_summary_shows_the_public_origin_as_the_address(tmp_path: Path) -> None:
+    """Адрес в summary — PUBLIC_ORIGIN, а не IP сервера (change public-domain-origin)."""
+    with_origin, without = tmp_path / "with", tmp_path / "without"
+    for run in (with_origin, without):
+        (run / "report").mkdir(parents=True)
+
+    text = summary(with_origin, with_origin / "report", JOB_STATUS="success", STEP_RESULTS=ALL_SUCCESS,
+                   PUBLIC_ORIGIN="https://review.example")
+    assert "| Адрес | | https://review.example/api/v1/ |" in text
+
+    text = summary(without, without / "report", JOB_STATUS="success", STEP_RESULTS=ALL_SUCCESS)
+    assert "| Адрес |" not in text
 
 
 def test_summary_of_a_password_change_that_reached_apply_has_no_warning(tmp_path: Path) -> None:

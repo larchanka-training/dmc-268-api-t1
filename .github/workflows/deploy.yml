@@ -191,8 +191,12 @@ jobs:
     permissions:
       contents: read
       packages: read
-    # Адрес стенда: публичный origin интерфейса и адрес в summary. На сервер
-    # шаги ходят через хост `stand` из ~/.ssh/config (stand-ssh).
+    # Публичный адрес стенда — для строки «Адрес» в summary; OpenTofu получает
+    # то же значение своей TF_VAR_public_origin (якорь *tofu-env). Источник —
+    # переменная репозитория PUBLIC_ORIGIN (https://<домен>), пока её нет —
+    # https://<VPS_DMC268_IP_T1>, как фронт (change public-domain-origin, D1).
+    # Сам IP сервера — для SSH: на сервер шаги ходят через хост `stand` из
+    # ~/.ssh/config (stand-ssh).
     #
     # Число экземпляров воркера (#99) — одно на job: его берут OpenTofu
     # (TF_VAR_*) и проверка воркеров после выката (check-worker.sh), поэтому
@@ -200,7 +204,7 @@ jobs:
     # бюджетом памяти и соединений базы (infra/README.md, «Масштабирование
     # воркеров»); потолок 4 держит проверка переменной в infra/variables.tf.
     env:
-      HOST: ${{ vars.VPS_DMC268_IP_T1 }}
+      PUBLIC_ORIGIN: ${{ vars.PUBLIC_ORIGIN || format('https://{0}', vars.VPS_DMC268_IP_T1) }}
       TF_VAR_worker_replicas: "1"
     # Шаги с id — для summary: исход каждого берёт шаг summary, а каждый шаг с
     # `run` первой строкой ставит засечку (.github/scripts/deploy/mark.sh) —
@@ -302,9 +306,15 @@ jobs:
           # внутренней docker-сети. Порт остаётся на петле для отладки. База и брокер портов на
           # хосте не публикуют вовсе: они только во внутренней сети стека.
           TF_VAR_bind_ip: 127.0.0.1
-          # Интерфейс отдаётся по HTTPS на тот же адрес (public_tls в dmc-268-ui-t1),
-          # и API приходят его запросы: с этим origin сверяется Origin.
-          TF_VAR_public_origin: https://${{ vars.VPS_DMC268_IP_T1 }}
+          # Публичный адрес стенда — то же выражение, что у PUBLIC_ORIGIN job'а:
+          # переменная репозитория PUBLIC_ORIGIN (https://<домен>), а пока её
+          # нет — https://<VPS_DMC268_IP_T1>, как у фронта (change
+          # public-domain-origin, D1). С ним API сверяет Origin, от него строит
+          # callback входа и ссылку из check run. Нет обеих переменных —
+          # выражение даёт `https://` без хоста, его infra.sh отклоняет до plan
+          # и apply; остальной битый формат ловит проверка переменной в
+          # infra/variables.tf на plan.
+          TF_VAR_public_origin: ${{ vars.PUBLIC_ORIGIN || format('https://{0}', vars.VPS_DMC268_IP_T1) }}
           TF_VAR_api_image: ${{ needs.image.outputs.image }}
           TF_VAR_postgres_password: ${{ secrets.PG_PASSWORD_DMC268_T1 }}
           # Пароль роли приложения dmc268_app (миграция 0023): под ней входят

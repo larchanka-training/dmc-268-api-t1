@@ -70,7 +70,7 @@ llm_hosted_fallback = false
 # github_app_private_key   = ""
 # github_app_client_id     = ""
 # github_app_client_secret = ""
-# public_origin            = "https://<адрес интерфейса>"
+# public_origin            = "https://<домен>"  # без / на конце, пути и порта
 
 # --- стек наблюдаемости ---
 # По умолчанию выключен (observability_enabled = false): локальному apply
