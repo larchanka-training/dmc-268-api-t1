@@ -1002,8 +1002,13 @@ ssh stand 'docker logs --since 15m dmc268-otelcol 2>&1'     # если в Loki �
 ```bash
 ssh stand 'docker restart dmc268-api'            # stop_timeout 15 с, потом SIGKILL
 ssh stand 'docker restart -t 30 dmc268-worker'   # 30 с, потом SIGKILL; и dmc268-worker-2 …
+ssh stand 'docker restart dmc268-ui'             # кабинет, состояния нет
 ssh stand 'docker inspect -f {{.State.Health.Status}} dmc268-api'   # ждём healthy
+ssh stand 'docker ps --filter name=dmc268-worker --format "{{.Names}} {{.Status}}"'   # все Up, без Restarting
 ```
+
+`dmc268-ui` перезапускаем, когда `PublicEndpointDown` или `ContainerDown` горят по нему — лежит
+сам кабинет. У воркера healthcheck нет, поэтому он поднялся — проверка `docker ps`, как в SM-05.
 
 `-t 30` у воркера обязателен. Без него `docker restart` ждёт `stop_timeout` воркера —
 `worker_stop_seconds` в `locals.tf`, 1260 с, с hosted-фоллбэком 2460 с, — а воркер перезапускают
@@ -1022,14 +1027,21 @@ ssh stand 'docker restart dmc268-postgres'
 ssh stand 'docker restart dmc268-rabbitmq'
 ```
 
+Рестарт брокера тоже обрывает идущий прогон: цикл чтения pika падает, воркер выходит и
+поднимается заново, а прогон висит в работе до 30 минут, как после `-t 30`. Поэтому после
+рестарта брокера ревью в демо-PR тоже запускаем заново — новым коммитом.
+
 Опасно и во время демо запрещено: `docker rm`, любые `docker volume …`, `docker system prune
 --volumes` и деплой с правкой их блока в `infra/`. Замена базы и брокера — только ручной деплой с
 `allow_stateful_replace=true` («Деплой»), тома не меняются никогда.
 
 Перезапуском не лечатся (раздел «Алерты»): `DiskSpaceCritical` — место на диске, кто растёт —
-`ssh stand 'docker system df -v'`; `LlmProviderCircuitOpen` — провайдер модели не отвечает, прогоны
-идут через фоллбэк, смотреть `review_circuit_breaker_state` и логи воркера по провайдеру;
-`LlmBudgetExceeded` — исчерпан месячный бюджет токенов, лечится только сменой бюджета.
+`ssh stand 'docker system df -v'`; `LlmProviderBalanceCritical` — на счёте Eurorouter меньше 1 €,
+ниже 0,10 € провайдер отвечает 402 и прогоны падают — пополнить баланс; `ProviderCircuitOpen`
+(critical) — не отвечают GitHub или все провайдеры модели, прогоны ждут в очереди, рестарт не
+поможет — план Б, шаг 6. `LlmProviderCircuitOpen` — warning: не отвечает один провайдер, прогоны идут
+через фоллбэк, демо не мешает. Алерты бюджета (`LlmBudgetExceeded` и др.) демо не мешают: бюджет —
+только recording rule в `alerts.yml`, приложение его не применяет.
 
 **5. Вебхуки.** Прогон по PR начинается с доставки вебхука на
 `<PUBLIC_ORIGIN>/api/v1/webhooks/github` (настройки App — [`docs/GITHUB_APP.md`](../docs/GITHUB_APP.md)):
@@ -1051,7 +1063,7 @@ ssh stand 'docker restart dmc268-rabbitmq'
 **6. План Б.** Стенд не поднялся за 10 минут — показываем локально, без стенда и без GitHub App:
 
 ```bash
-cp -n .env.example .env && docker compose up -d --wait   # -n: свой .env не затирать
+[ -f .env ] || cp .env.example .env; docker compose up -d --wait   # свой .env не затирать
 ```
 
 Если `.env` уже был — в нём должен стоять `DEMO_MODE=true`. `--wait` не ждёт `seed`: первые
