@@ -65,7 +65,7 @@ ID шага, коммит сборки, шаги воспроизведения,
 | SM-11 | **[вручную]** перезагрузить страницу; `GET /api/v1/auth/me` из DevTools | сессия жива, `200` с профилем | | |
 | SM-12 | **[вручную]** выйти (`POST /api/v1/auth/logout`), затем `GET /api/v1/auth/me` с той же cookie из другой вкладки | `204`, затем `401 UNAUTHENTICATED` (Problem Details с `trace_id`) | | |
 | SM-13 | **[вручную]** `curl -si -X POST "$PUBLIC_ORIGIN/api/v1/auth/logout" -H 'Origin: https://evil.example'` | `403 ORIGIN_FORBIDDEN` — middleware режет запрос до сессии | | |
-| SM-15 | **[вручную]** `curl -si -X POST "$PUBLIC_ORIGIN/api/v1/auth/logout" -H "Origin: $PUBLIC_ORIGIN"` — пара к SM-13 со своим `Origin` | `204`; `403 ORIGIN_FORBIDDEN` — `PUBLIC_ORIGIN` бэкенда не совпадает с `PUBLIC_HOST` фронта, хотя деплой зелёный | | |
+| SM-15 | **[вручную]** `curl -si -X POST "$PUBLIC_ORIGIN/api/v1/auth/logout" -H "Origin: $PUBLIC_ORIGIN"` — пара к SM-13 со своим `Origin` | `204`. `403 ORIGIN_FORBIDDEN` означает, что `PUBLIC_ORIGIN` бэкенда не совпадает с `PUBLIC_HOST` фронта, хотя деплой зелёный | | |
 | SM-14 | **[авто]** `tests/test_auth_api.py`: `state` не совпал, отказ провайдера, внешний `redirect`, истёкшая cookie | job `test` зелёный | | |
 
 ## 4. Вебхуки

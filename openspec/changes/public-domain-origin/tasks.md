@@ -10,7 +10,7 @@
 
 ## 3. GitHub App и документация
 
-- [ ] 3.1 Сразу после перехода фронта на боевой LE админ App меняет только webhook URL на `https://<домен>/api/v1/webhooks/github` и Setup URL на `https://<домен>/api/v1/auth/github/setup` с включённым «Redirect on update» (callback не трогает — он добавлен в 1.2), затем Redeliver упавших за окно доставок в Recent Deliveries; проверка — вход через GitHub работает, Recent Deliveries 2xx
+- [ ] 3.1 Сразу после перехода фронта на боевой LE админ App меняет только webhook URL на `https://<домен>/api/v1/webhooks/github` и Setup URL на `https://<домен>/api/v1/auth/github/setup` с включённым «Redirect on update» (callback не трогает — он добавлен в 1.2), упавшие за окно доставки повторяет воркер (#149, ~2,5 ч), ручной Redeliver в Recent Deliveries — только последней доставки каждого PR, оставшейся красной (при окне дольше ~2,5 ч — обязателен); проверка — вход через GitHub работает, Recent Deliveries 2xx
 - [x] 3.2 `docs/GITHUB_APP.md`, `docs/testing/RELEASE_SMOKE.md`, `infra/README.md`: адрес сервиса — домен; проверка — `grep -rn 62.169.24.237` находит только упоминания сервера (SSH, запасной адрес по IP в `infra/tests/main.tftest.hcl`)
 
 ## 4. Итоговая проверка
