@@ -23,7 +23,7 @@
 | **Владелец приложения** | Тот, кто создал приложение и меняет его настройки. У нас приложение `botyanya` создано в личном аккаунте `ilyassakhanov`, приложение публичное |
 | **Владелец установки** | Аккаунт или организация, где лежат репозитории: первая часть адреса `github.com/<владелец>/<репозиторий>` |
 | **Интерфейс** | Фронтенд сервиса, репозиторий `dmc-268-ui-t1` |
-| **Стенд** | Сервер, где развёрнут сервис. Его публичный адрес — переменная репозитория `PUBLIC_ORIGIN` (`https://<домен>`, узнать: `gh variable get PUBLIC_ORIGIN -R larchanka-training/dmc-268-api-t1`; пока `PUBLIC_ORIGIN` не задана, `<PUBLIC_ORIGIN>` = `https://<VPS_DMC268_IP_T1>` — стенд работает по IP; [infra/README](../infra/README.md), «Публичный адрес стенда»); ниже он пишется как `<PUBLIC_ORIGIN>` |
+| **Стенд** | Сервер, где развёрнут сервис. Его публичный адрес — переменная репозитория `PUBLIC_ORIGIN` (`https://<домен>`, узнать: `gh variable get PUBLIC_ORIGIN -R larchanka-training/dmc-268-api-t1`; пока `PUBLIC_ORIGIN` не задана, `<PUBLIC_ORIGIN>` = `https://<VPS_DMC268_IP_T1>` — стенд работает по IP; IP — переменная организации, узнать: `gh api repos/larchanka-training/dmc-268-api-t1/actions/organization-variables -q '.variables[]\|select(.name=="VPS_DMC268_IP_T1").value'`; [infra/README](../infra/README.md), «Публичный адрес стенда»); ниже он пишется как `<PUBLIC_ORIGIN>` |
 
 Доступов к GitHub у сервиса три, и их легко спутать:
 

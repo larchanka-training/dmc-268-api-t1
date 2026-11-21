@@ -231,7 +231,7 @@ tofu apply infra.tfplan
 
 ### Публичный адрес стенда
 
-Адрес сервиса и адрес сервера — две разные переменные репозитория. `VPS_DMC268_IP_T1` — IP
+Адрес сервиса и адрес сервера — две разные переменные. `VPS_DMC268_IP_T1` (организации) — IP
 сервера: по нему ходит SSH (`.github/actions/stand-ssh`, `db-backup.yml`), его ключ закреплён в
 `.github/ssh/known_hosts`. `PUBLIC_ORIGIN` — публичный адрес сервиса, `https://<домен>`: его
 получают API и воркер (`public_origin`), Grafana (`<PUBLIC_ORIGIN>:8443/grafana/`), проба
@@ -282,9 +282,11 @@ Webhook URL на домен не переключить — staging-сертиф
 доставку `pull_request` он пропускает, сверив её с текущей головой PR. Ручной Redeliver эту
 сверку обходит и может вернуть ревью на старую голову, поэтому вслепую все упавшие доставки не
 переотправляем. Уложилось окно в ~2,5 ч — ждём воркер, а Redeliver в Recent Deliveries App
-делаем только для того, что после его попыток осталось красным, и только для последней доставки
-каждого PR. Окно дольше ~2,5 ч — попытки воркера кончаются, и ручной Redeliver (последней
-доставки каждого PR) обязателен.
+делаем только для того, что после его попыток осталось красным: последнюю доставку
+`pull_request` с действием `opened`/`synchronize`/`edited` на каждый PR и все красные
+`pull_request_review_thread`. Последняя доставка PR не годится: у треда нет head, а последней
+может оказаться `labeled`/`closed`, их приём игнорирует. Окно дольше ~2,5 ч — попытки воркера
+кончаются, и ручной Redeliver того же набора обязателен.
 
 1. DNS: A-запись домена указывает на IP сервера (`VPS_DMC268_IP_T1`); проверка —
    `dig +short <домен>` отдаёт этот IP.
@@ -296,24 +298,30 @@ Webhook URL на домен не переключить — staging-сертиф
    у боевого лимит — 5 одинаковых сертификатов в неделю, отладка на нём его съест. Том
    `dmc268-ui-acme` не трогаем. С этого шага начинается окно без вебхуков.
 4. Бэкенд: `gh variable set PUBLIC_ORIGIN --body https://<домен>` и деплой. Между шагами 3 и 4
-   изменяющие запросы с нового адреса получают `403 ORIGIN_FORBIDDEN` — окно в минуты.
-   Обязательная проверка после деплоя (`-k` — пока сертификат staging):
+   изменяющие запросы с нового адреса получают `403 ORIGIN_FORBIDDEN` и не работает вход:
+   `redirect_uri` ещё по старому адресу, а host-only `oauth_state` на него не уходит, — окно в
+   минуты. Обязательная проверка после деплоя (`-k` — пока сертификат staging):
 
    ```bash
    export PUBLIC_ORIGIN=https://<домен>
-   curl -sik -X POST "$PUBLIC_ORIGIN/api/v1/auth/logout" -H "Origin: $PUBLIC_ORIGIN"
+   FRONT_HOST="$(gh variable get PUBLIC_HOST -R larchanka-training/dmc-268-ui-t1 2>/dev/null || gh api repos/larchanka-training/dmc-268-ui-t1/actions/organization-variables -q '.variables[]|select(.name=="VPS_DMC268_IP_T1").value')"
+   curl -sik -X POST "$PUBLIC_ORIGIN/api/v1/auth/logout" -H "Origin: https://$FRONT_HOST"
    ```
 
-   Ждём `204`. `403 ORIGIN_FORBIDDEN` — значение `PUBLIC_ORIGIN` не совпадает с `PUBLIC_HOST`
-   фронта: деплой при этом зелёный, а изменяющие запросы из браузера не проходят.
+   `Origin` берётся у фронта тем же выражением, что и в его деплое (`PUBLIC_HOST`, без неё — IP
+   стенда), поэтому `403 ORIGIN_FORBIDDEN` значит расхождение `PUBLIC_ORIGIN` с `PUBLIC_HOST`.
+   `Origin` из `PUBLIC_ORIGIN` для пробы не годится: у `nginx` фронта на 443 один `server`, `-k`
+   прощает чужое имя, и проба дала бы `204` там, где браузер получит `403`. Ждём `204`; при
+   `403` деплой зелёный, а изменяющие запросы из браузера не проходят.
 5. Фронт переключается на боевой Let's Encrypt; `PublicEndpointDown` гаснет — тишину снять.
 6. Сразу за шагом 5 админ GitHub App меняет Webhook URL на
    `<PUBLIC_ORIGIN>/api/v1/webhooks/github` и Setup URL на
    `<PUBLIC_ORIGIN>/api/v1/auth/github/setup` с включённым «Redirect on update»
    (`docs/GITHUB_APP.md`, таблица настроек App). Callback URL на этом шаге не трогаем.
    Упавшие за окно доставки — по абзацу «Упавшие за окно доставки повторяет воркер»: ручной
-   Redeliver в Advanced → Recent Deliveries — только последней доставки каждого PR и только
-   если она осталась красной после попыток воркера (GitHub хранит доставки около 3 дней).
+   Redeliver в Advanced → Recent Deliveries — только оставшегося красным после попыток воркера:
+   последнюю доставку `pull_request` с действием `opened`/`synchronize`/`edited` на каждый PR и
+   все красные `pull_request_review_thread` (GitHub хранит доставки около 3 дней).
    Callback по старому адресу удаляется, когда домен устоялся (откат больше не нужен).
 
 Cookie сессии host-only (без `Domain`), поэтому после переезда входят заново все: cookie
@@ -330,14 +338,17 @@ Deliveries App — `2xx`.
 1. Бэкенд: `gh variable delete PUBLIC_ORIGIN -R larchanka-training/dmc-268-api-t1` и деплой
    (`gh workflow run deploy.yml --ref develop`) — origin снова `https://<VPS_DMC268_IP_T1>`.
 2. Фронт (`dmc-268-ui-t1`) деплоится обратно на IP — по его `infra/README.md`. После шага
-   проба `Origin` из шага 4 выкатки без `-k` с `PUBLIC_ORIGIN=https://<VPS_DMC268_IP_T1>` отдаёт `204`.
+   проба `Origin` из шага 4 выкатки без `-k` с `PUBLIC_ORIGIN=https://<VPS_DMC268_IP_T1>`
+   отдаёт `204`: `PUBLIC_HOST` у фронта после отката не задана, и `FRONT_HOST` сам берёт IP.
 3. Сразу за шагом 2 админ GitHub App возвращает на адрес по IP только Webhook и Setup URL;
    Callback URL не трогаем — оба callback зарегистрированы. Упавшие доставки — так же, как
-   при выкатке: их повторяет воркер, ручной Redeliver — только последней доставки каждого PR,
-   оставшейся красной.
+   при выкатке: их повторяет воркер, ручной Redeliver — только оставшегося красным: последнюю
+   доставку `pull_request` с действием `opened`/`synchronize`/`edited` на каждый PR и все
+   красные `pull_request_review_thread`.
 
 Между шагами 1 и 2 браузер ещё ходит по домену, а API ждёт origin по IP: изменяющие запросы
-получают `403 ORIGIN_FORBIDDEN` — окно в минуты, как при выкатке. Вебхуки тоже идут с окном:
+получают `403 ORIGIN_FORBIDDEN` и не работает вход — `redirect_uri` уже по IP, а host-only
+`oauth_state` домена туда не уходит; окно в минуты, как при выкатке. Вебхуки тоже идут с окном:
 до шага 2 Webhook URL смотрит на домен, и домен отдаёт свой сертификат — доставки проходят;
 после шага 2 фронт на IP, и домен из Webhook URL отдаёт сертификат IP — GitHub доставку не
 принимает до шага 3. Поэтому шаги 2 и 3 подряд. `PublicEndpointDown` на
