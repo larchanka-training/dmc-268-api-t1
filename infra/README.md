@@ -254,12 +254,14 @@ gh variable get PUBLIC_ORIGIN -R larchanka-training/dmc-268-api-t1
 `VPS_DMC268_IP_T1`, выражение даёт `https://`) `infra.sh` отклоняет до `plan` и `apply`.
 
 **Смена адреса** (переход с IP на домен или на другой домен) затрагивает оба репозитория и
-GitHub App; порядок — из design change `public-domain-origin`. С шага 2 до шага 4 горит
-критический алерт `PublicEndpointDown` (проба `https_public` по `public_origin` проверяет
-цепочку сертификата): до шага 3 она ходит по старому адресу, а фронт там уже отдаёт
-staging-сертификат домена или перенаправляет на домен, после шага 3 — прямо по домену; staging
-Let's Encrypt проба не доверяет до шага 4. Перед шагом 2 заглушите его на
-время окна и снимите тишину после шага 4 (раздел «Алерты»). Тишина на 2 часа; если DNS или
+GitHub App; порядок — из design change `public-domain-origin`. Ниже «старый адрес» — текущий
+`PUBLIC_ORIGIN` (пока переменная не задана — `https://<VPS_DMC268_IP_T1>`), «домен» — новый.
+
+С шага 3 до шага 5 горит критический алерт `PublicEndpointDown` (проба `https_public` по
+`public_origin` проверяет цепочку сертификата): до шага 4 она ходит по старому адресу, а фронт
+там уже отдаёт staging-сертификат домена или перенаправляет на домен, после шага 4 — прямо по
+домену; staging Let's Encrypt проба не доверяет до шага 5. Перед шагом 3 заглушите его на
+время окна и снимите тишину после шага 5 (раздел «Алерты»). Тишина на 2 часа; если DNS или
 выкатка тянутся дольше — продлите её до истечения (`amtool silence update <id> --duration=…`
 или новый `silence add`):
 
@@ -269,33 +271,66 @@ ssh stand 'docker exec dmc268-alertmanager amtool silence query --alertmanager.u
 ssh stand 'docker exec dmc268-alertmanager amtool silence expire <id> --alertmanager.url=http://127.0.0.1:9093'
 ```
 
+**Окно без вебхуков.** У `nginx` фронта на 443 один `server`, поэтому с шага 3 по старому
+адресу отдаётся сертификат домена. GitHub проверяет TLS при доставке, и доставки на старый
+Webhook URL падают с шага 3 до шага 6: PR в это время ревью не получают. Раньше шага 5
+Webhook URL на домен не переключить — staging-сертификату GitHub не доверяет. Поэтому шаги 5
+и 6 делаются подряд, без паузы, а после шага 6 упавшие доставки переотправляются (Redeliver).
 
 1. DNS: A-запись домена указывает на IP сервера (`VPS_DMC268_IP_T1`); проверка —
    `dig +short <домен>` отдаёт этот IP.
-2. Фронт (`dmc-268-ui-t1`) деплоится с доменом на staging Let's Encrypt (`acme_directory`):
+2. Админ GitHub App **добавляет** Callback URL `https://<домен>/api/v1/auth/github/callback`
+   вторым (App принимает до 10), а callback по старому адресу оставляет. С шага 4 API строит
+   `redirect_uri` от нового `PUBLIC_ORIGIN`, и незарегистрированный callback не пустит в
+   сервис никого.
+3. Фронт (`dmc-268-ui-t1`) деплоится с доменом на staging Let's Encrypt (`acme_directory`):
    у боевого лимит — 5 одинаковых сертификатов в неделю, отладка на нём его съест. Том
-   `dmc268-ui-acme` не трогаем.
-3. Бэкенд: `gh variable set PUBLIC_ORIGIN --body https://<домен>` и деплой. Между шагами 2 и 3
+   `dmc268-ui-acme` не трогаем. С этого шага начинается окно без вебхуков.
+4. Бэкенд: `gh variable set PUBLIC_ORIGIN --body https://<домен>` и деплой. Между шагами 3 и 4
    изменяющие запросы с нового адреса получают `403 ORIGIN_FORBIDDEN` — окно в минуты.
-4. Фронт переключается на боевой Let's Encrypt; `PublicEndpointDown` гаснет — тишину снять.
-5. Админ GitHub App меняет Callback URL на `<PUBLIC_ORIGIN>/api/v1/auth/github/callback`,
-   Webhook URL на `<PUBLIC_ORIGIN>/api/v1/webhooks/github` и Setup URL на
+   Обязательная проверка после деплоя (`-k` — пока сертификат staging):
+
+   ```bash
+   export PUBLIC_ORIGIN=https://<домен>
+   curl -sik -X POST "$PUBLIC_ORIGIN/api/v1/auth/logout" -H "Origin: $PUBLIC_ORIGIN"
+   ```
+
+   Ждём `204`. `403 ORIGIN_FORBIDDEN` — значение `PUBLIC_ORIGIN` не совпадает с `PUBLIC_HOST`
+   фронта: деплой при этом зелёный, а изменяющие запросы из браузера не проходят.
+5. Фронт переключается на боевой Let's Encrypt; `PublicEndpointDown` гаснет — тишину снять.
+6. Сразу за шагом 5 админ GitHub App меняет Webhook URL на
+   `<PUBLIC_ORIGIN>/api/v1/webhooks/github` и Setup URL на
    `<PUBLIC_ORIGIN>/api/v1/auth/github/setup` с включённым «Redirect on update»
-   (`docs/GITHUB_APP.md`, таблица настроек App).
+   (`docs/GITHUB_APP.md`, таблица настроек App). Callback URL на этом шаге не трогаем. Затем
+   в Advanced → Recent Deliveries App упавшие за окно доставки переотправляются кнопкой
+   Redeliver — GitHub хранит их около 3 дней. Callback по старому адресу удаляется, когда
+   домен устоялся (откат больше не нужен).
 
-Проверка после выкатки — `docs/testing/RELEASE_SMOKE.md`, SM-04, SM-13 и SM-21 по новому
-адресу; вход через GitHub работает, в Recent Deliveries App — `2xx`.
+Cookie сессии host-only (без `Domain`), поэтому после переезда входят заново все: cookie
+старого адреса браузер на домен не отправит. То же — после отката.
 
-**Откат на адрес по IP** — в обратном порядке: сначала бэкенд, потом фронт.
+Проверка после выкатки — `docs/testing/RELEASE_SMOKE.md`, SM-04, SM-13, SM-15 и SM-21 по новому
+адресу; проба `Origin` из шага 4 без `-k` отдаёт `204`; вход через GitHub работает, в Recent
+Deliveries App — `2xx`.
+
+**Откат на адрес по IP** — в обратном порядке: сначала бэкенд, потом фронт. Callback по IP
+должен быть зарегистрирован в App: если его уже удалили, админ App добавляет его вторым до
+шага 1.
 
 1. Бэкенд: `gh variable delete PUBLIC_ORIGIN -R larchanka-training/dmc-268-api-t1` и деплой
    (`gh workflow run deploy.yml --ref develop`) — origin снова `https://<VPS_DMC268_IP_T1>`.
-2. Фронт (`dmc-268-ui-t1`) деплоится обратно на IP — по его `infra/README.md`.
-3. Админ GitHub App возвращает Callback, Webhook и Setup URL на адрес по IP.
+2. Фронт (`dmc-268-ui-t1`) деплоится обратно на IP — по его `infra/README.md`. После шага
+   проба `Origin` из шага 4 выкатки с `PUBLIC_ORIGIN=https://<VPS_DMC268_IP_T1>` отдаёт `204`.
+3. Сразу за шагом 2 админ GitHub App возвращает на адрес по IP только Webhook и Setup URL;
+   Callback URL не трогаем — оба callback зарегистрированы. Затем — Redeliver упавших
+   доставок в Recent Deliveries.
 
 Между шагами 1 и 2 браузер ещё ходит по домену, а API ждёт origin по IP: изменяющие запросы
-получают `403 ORIGIN_FORBIDDEN` — окно в минуты, как при выкатке. `PublicEndpointDown` на
-время отката тоже глушится.
+получают `403 ORIGIN_FORBIDDEN` — окно в минуты, как при выкатке. Вебхуки тоже идут с окном:
+пока фронт не передеплоен на IP, адрес по IP отдаёт сертификат домена, а после шага 2 домен,
+куда ещё смотрит Webhook URL, отдаёт уже другой сертификат — GitHub на них доставку не
+принимает до шага 3, поэтому шаги 2 и 3 подряд и Redeliver после. `PublicEndpointDown` на
+время отката тоже глушится. После отката все входят заново: cookie сессии host-only.
 
 ## Масштабирование воркеров
 
