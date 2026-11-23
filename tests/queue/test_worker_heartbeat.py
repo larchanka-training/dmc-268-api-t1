@@ -3,7 +3,8 @@
 Обработчик и проход очистки идут в своём потоке, а цикл соединения отвечает брокеру:
 обработка, очистка и пауза перед повтором дольше двух интервалов heartbeat не рвут
 соединение, и ack доходит. До правки они шли в главном потоке — брокер закрывал соединение
-по пропущенным heartbeat, а `basic_ack` падал `StreamLostError`.
+по пропущенным heartbeat, а `basic_ack` падал `StreamLostError`. Конец обработчика будит цикл
+соединения, и ack не ждёт его такта (#401).
 """
 
 import json
@@ -104,6 +105,26 @@ def test_a_handler_longer_than_two_heartbeats_keeps_the_connection_and_acks(
 
     assert handled
     # ack дошёл: сообщение не вернулось в очередь и не ушло в DLQ.
+    assert _count(channel, QUEUE_NAME) == 0
+    assert _count(channel, DLQ_NAME) == 0
+
+
+def test_a_short_handler_is_acked_without_waiting_for_the_loop_tick(
+    channel: pika.adapters.blocking_connection.BlockingChannel,
+) -> None:
+    """#401: конец обработчика будит `process_data_events` настоящего pika
+    (`add_callback_threadsafe`), и ack уходит сразу, а не на следующем такте в 1 с."""
+    RabbitMQJobQueue(TEST_RABBITMQ_URL).enqueue(JOB)  # type: ignore[arg-type]
+    finished: list[float] = []
+
+    def short(body: bytes) -> None:
+        time.sleep(0.05)
+        finished.append(time.monotonic())
+
+    build_worker(_settings()).run(short, limit=1)
+    after_handler = time.monotonic() - finished[0]
+
+    assert after_handler < 0.5, f"ack ушёл через {after_handler:.2f} с после обработчика"
     assert _count(channel, QUEUE_NAME) == 0
     assert _count(channel, DLQ_NAME) == 0
 

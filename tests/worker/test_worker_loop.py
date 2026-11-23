@@ -279,9 +279,12 @@ def test_worker_connection_has_heartbeat_enabled(monkeypatch) -> None:
     assert captured["heartbeat"] == factory.WORKER_HEARTBEAT_SECONDS > 0
 
 
-def test_the_connection_loop_turns_while_the_handler_works() -> None:
+def test_the_connection_loop_turns_while_the_handler_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Обработчик — в своём потоке, главный крутит цикл соединения: ответ на heartbeat идёт
     и посреди долгой обработки, а ack — из главного потока, когда обработчик закончил."""
+    monkeypatch.setattr(factory, "_HANDLER_POLL_SECONDS", 0.01)
     started = threading.Event()
     release = threading.Event()
     connection = FakeConnection()
@@ -303,6 +306,54 @@ def test_the_connection_loop_turns_while_the_handler_works() -> None:
 
     assert not runner.is_alive()
     assert handler_threads[0] is not runner
+    assert channel.acked == [1]
+
+
+def test_a_short_handler_is_acked_without_waiting_for_the_loop_tick() -> None:
+    """#401: конец обработчика будит цикл соединения, и ack уходит сразу, а не на следующем
+    такте в 1 с — иначе обработчик на ~1 с подтверждается через ~2 с."""
+    channel = _strict([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
+
+    started = time.monotonic()
+    _worker(channel).run(lambda body: time.sleep(0.05), limit=1)
+    elapsed = time.monotonic() - started
+
+    assert channel.acked == [1]
+    assert elapsed < 0.5 < factory._HANDLER_POLL_SECONDS
+
+
+def test_a_short_sweep_hands_over_to_the_message_without_waiting_for_the_loop_tick() -> None:
+    """#401: проход очистки тоже будит цикл, когда закончил, — сообщение этого такта
+    не ждёт следующего."""
+    channel = _strict([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
+    swept: list[bool] = []
+
+    def sweep() -> None:
+        time.sleep(0.05)
+        swept.append(True)
+
+    started = time.monotonic()
+    _worker(channel).run(lambda body: None, limit=1, sweep=sweep, sweep_interval=0)
+    elapsed = time.monotonic() - started
+
+    assert swept == [True]
+    assert channel.acked == [1]
+    assert elapsed < 0.5 < factory._HANDLER_POLL_SECONDS
+
+
+def test_a_closed_connection_does_not_break_the_wake_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Соединение закрылось, пока шёл обработчик: разбудить цикл нельзя, но поток не падает,
+    и главный поток доводит сообщение до конца на своём такте, как раньше."""
+    monkeypatch.setattr(factory, "_HANDLER_POLL_SECONDS", 0.01)
+
+    class ClosedConnection(FakeConnection):
+        def add_callback_threadsafe(self, callback: Any) -> None:
+            raise pika.exceptions.ConnectionWrongStateError("соединение закрыто")
+
+    channel = _strict([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
+
+    _worker(channel, ClosedConnection()).run(lambda body: None, limit=1)
+
     assert channel.acked == [1]
 
 
@@ -365,9 +416,12 @@ def test_a_stop_request_cuts_the_retry_pause_short() -> None:
     assert channel.rejected == [1]
 
 
-def test_the_connection_loop_turns_while_the_sweep_works() -> None:
+def test_the_connection_loop_turns_while_the_sweep_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Проход очистки ходит в базу и GitHub: он тоже в своём потоке, а главный крутит цикл
     соединения и отвечает на heartbeat."""
+    monkeypatch.setattr(factory, "_HANDLER_POLL_SECONDS", 0.01)
     started = threading.Event()
     release = threading.Event()
     connection = FakeConnection()
