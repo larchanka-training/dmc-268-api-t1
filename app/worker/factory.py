@@ -303,10 +303,14 @@ class Worker:
         потокобезопасен, поэтому `work` к нему не прикасается — ack и reject делает главный
         поток потом. Закончив, поток будит цикл единственным потокобезопасным вызовом
         `add_callback_threadsafe`: иначе главный поток заметил бы конец только на следующем
-        такте, и ack ждал бы до секунды (#401). Исключение `work` возвращается;
+        такте, и ack ждал бы до секунды (#401). Цикл ждёт события `done`, выставленного до
+        пробуждения, а не смерти потока: колбэк встаёт в очередь раньше, чем
+        `add_callback_threadsafe` вернётся, и проснувшийся цикл застал бы поток живым, а
+        следующего пробуждения уже не будет. Исключение `work` возвращается;
         `KeyboardInterrupt` и `SystemExit` пробрасываются в главный поток.
         """
         failure: list[BaseException] = []
+        done = threading.Event()
 
         def target() -> None:
             try:
@@ -315,6 +319,8 @@ class Worker:
             except BaseException as caught:  # noqa: BLE001 — исход решает вызывающий или главный поток
                 failure.append(caught)
             finally:
+                # До пробуждения: проснувшийся цикл уже видит конец работы.
+                done.set()
                 # Закрытое соединение будить нечем: о его потере главный поток узнает из
                 # `process_data_events`, как без пробуждения.
                 with contextlib.suppress(pika.exceptions.ConnectionWrongStateError):
@@ -322,7 +328,7 @@ class Worker:
 
         thread = threading.Thread(target=target, name=name, daemon=True)
         thread.start()
-        while thread.is_alive():
+        while not done.is_set():
             try:
                 self.connection.process_data_events(time_limit=_HANDLER_POLL_SECONDS)
             except Exception:
@@ -331,7 +337,8 @@ class Worker:
                 # подтвердит уже завершённый прогон (`run_review` его пропускает).
                 thread.join()
                 raise
-            thread.join(timeout=0)
+        # Работа кончилась, ждём только хвост `add_callback_threadsafe`.
+        thread.join()
         if not failure:
             return None
         caught = failure[0]

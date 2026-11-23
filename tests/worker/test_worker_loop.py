@@ -341,6 +341,27 @@ def test_a_short_sweep_hands_over_to_the_message_without_waiting_for_the_loop_ti
     assert elapsed < 0.5 < factory._HANDLER_POLL_SECONDS
 
 
+def test_the_wake_up_is_not_lost_while_the_thread_finishes() -> None:
+    """Колбэк пробуждения встаёт в очередь раньше, чем `add_callback_threadsafe` вернётся, и
+    поток ещё жив, когда главный его выполняет. Цикл ждёт флага конца работы, а не смерти
+    потока, — иначе пробуждение съедается и ack ждёт полный такт."""
+
+    class LingeringWake(FakeConnection):
+        def add_callback_threadsafe(self, callback: Any) -> None:
+            super().add_callback_threadsafe(callback)
+            time.sleep(0.2)
+
+    channel = _strict([(SimpleNamespace(delivery_tag=1, redelivered=False), None, b"{}")])
+
+    started = time.monotonic()
+    _worker(channel, LingeringWake()).run(lambda body: None, limit=1)
+    elapsed = time.monotonic() - started
+
+    assert channel.acked == [1]
+    assert elapsed < 0.5 < factory._HANDLER_POLL_SECONDS
+
+
+@pytest.mark.filterwarnings("error::pytest.PytestUnhandledThreadExceptionWarning")
 def test_a_closed_connection_does_not_break_the_wake_up(monkeypatch: pytest.MonkeyPatch) -> None:
     """Соединение закрылось, пока шёл обработчик: разбудить цикл нельзя, но поток не падает,
     и главный поток доводит сообщение до конца на своём такте, как раньше."""
