@@ -10,8 +10,17 @@
 
 **Стенд.** Сборка — вершина `develop`, выкаченная workflow `Deploy` (`.github/workflows/deploy.yml`,
 устройство — [infra/README](../../infra/README.md), «Деплой»). Публичный вход — кабинет
-https://62.169.24.237 (nginx интерфейса проксирует `/api/v1/…` с исходным путём), Grafana —
-https://62.169.24.237:8443/grafana/. `/health` наружу не публикуется: проверка — на сервере
+по адресу стенда `$PUBLIC_ORIGIN` (переменная репозитория `PUBLIC_ORIGIN`, `https://<домен>`;
+[infra/README](../../infra/README.md), «Публичный адрес стенда»; nginx интерфейса проксирует
+`/api/v1/…` с исходным путём), Grafana — `$PUBLIC_ORIGIN:8443/grafana/`. Команды `curl` ниже
+берут адрес из переменной окружения:
+`export PUBLIC_ORIGIN="$(gh variable get PUBLIC_ORIGIN -R larchanka-training/dmc-268-api-t1 2>/dev/null || echo "https://$(gh api repos/larchanka-training/dmc-268-api-t1/actions/organization-variables -q '.variables[]|select(.name=="VPS_DMC268_IP_T1").value')")"`.
+Пока переменная `PUBLIC_ORIGIN` не задана, адрес стенда — по IP, `https://<VPS_DMC268_IP_T1>`:
+так же поступает деплой. `VPS_DMC268_IP_T1` — переменная организации, `gh variable get -R` её
+не видит, поэтому IP берётся через `gh api`. Хост фронта для пробы `Origin` (SM-15) — так же,
+как его берёт деплой фронта (`PUBLIC_HOST`, без неё — IP):
+`export FRONT_HOST="$(gh variable get PUBLIC_HOST -R larchanka-training/dmc-268-ui-t1 2>/dev/null || gh api repos/larchanka-training/dmc-268-ui-t1/actions/organization-variables -q '.variables[]|select(.name=="VPS_DMC268_IP_T1").value')"`.
+`/health` наружу не публикуется: проверка — на сервере
 (`ssh stand`, хост из [infra/README](../../infra/README.md), «Деплой»).
 
 **Демо-репозиторий.** Ручные шаги идут на демо-репозитории с установленной GitHub App
@@ -44,7 +53,7 @@ ID шага, коммит сборки, шаги воспроизведения,
 | SM-01 | **[авто]** workflow `CI`, job `compose-smoke` на коммите сборки: `docker compose up --wait`, `curl /health`, `curl :8080/api/v1/status` через nginx интерфейса, воркер в `running` | job зелёный | | |
 | SM-02 | **[авто]** workflow `Deploy` на коммите сборки | run зелёный; в summary — применённые миграции, шаг «Проверить, что воркеры работают» прошёл (`check-worker.sh`: все `worker_replicas` экземпляров запущены и 30 с не перезапускаются) | | |
 | SM-03 | **[вручную]** `ssh stand 'docker inspect -f {{.State.Health.Status}} dmc268-api'` — healthcheck контейнера бьёт в `/health` | `healthy` | | |
-| SM-04 | **[вручную]** `curl -si https://62.169.24.237/api/v1/status` | `200`, `status` и все три компонента `api`, `worker`, `queue` — `operational`; `unknown` — мониторинг не отвечает, это баг стенда | | |
+| SM-04 | **[вручную]** `curl -si "$PUBLIC_ORIGIN/api/v1/status"` | `200`, `status` и все три компонента `api`, `worker`, `queue` — `operational`; `unknown` — мониторинг не отвечает, это баг стенда | | |
 | SM-05 | **[вручную]** `ssh stand 'docker ps --filter name=dmc268-worker --format "{{.Names}} {{.Status}}"'` | все экземпляры `Up`, без `Restarting` | | |
 | SM-06 | **[вручную]** `uv run alembic heads` на коммите сборки; summary run деплоя, таблица миграций | голова одна; «Ревизия после» в summary равна ей; если деплой применил 0 миграций — та же строка в summary последнего деплоя с миграциями | | |
 
@@ -58,7 +67,8 @@ ID шага, коммит сборки, шаги воспроизведения,
 | SM-10 | **[вручную]** открыть кабинет, «Войти через GitHub» (`GET /api/v1/auth/github/login`), разрешить доступ | возврат в кабинет; cookie `session` с `HttpOnly; Secure; SameSite=Lax; Path=/` | | |
 | SM-11 | **[вручную]** перезагрузить страницу; `GET /api/v1/auth/me` из DevTools | сессия жива, `200` с профилем | | |
 | SM-12 | **[вручную]** выйти (`POST /api/v1/auth/logout`), затем `GET /api/v1/auth/me` с той же cookie из другой вкладки | `204`, затем `401 UNAUTHENTICATED` (Problem Details с `trace_id`) | | |
-| SM-13 | **[вручную]** `curl -si -X POST https://62.169.24.237/api/v1/auth/logout -H 'Origin: https://evil.example'` | `403 ORIGIN_FORBIDDEN` — middleware режет запрос до сессии | | |
+| SM-13 | **[вручную]** `curl -si -X POST "$PUBLIC_ORIGIN/api/v1/auth/logout" -H 'Origin: https://evil.example'` | `403 ORIGIN_FORBIDDEN` — middleware режет запрос до сессии | | |
+| SM-15 | **[вручную]** `curl -si -X POST "$PUBLIC_ORIGIN/api/v1/auth/logout" -H "Origin: https://$FRONT_HOST"` — пара к SM-13 с `Origin` фронта | `204`. `403 ORIGIN_FORBIDDEN` означает, что `PUBLIC_ORIGIN` бэкенда не совпадает с `PUBLIC_HOST` фронта, хотя деплой зелёный | | |
 | SM-14 | **[авто]** `tests/test_auth_api.py`: `state` не совпал, отказ провайдера, внешний `redirect`, истёкшая cookie | job `test` зелёный | | |
 
 ## 4. Вебхуки
@@ -69,7 +79,7 @@ ID шага, коммит сборки, шаги воспроизведения,
 | ID | Шаг | Ожидание | Результат | Баг |
 |---|---|---|---|---|
 | SM-20 | **[вручную]** открыть PR в демо-репозитории; в настройках GitHub App стенда — Advanced → Recent Deliveries | доставка `pull_request` с ответом `202`, тело — прогон (`ReviewJob`) | | |
-| SM-21 | **[вручную]** `curl -si -X POST https://62.169.24.237/api/v1/webhooks/github -H 'X-GitHub-Event: pull_request' -H 'X-Hub-Signature-256: sha256=00' -d '{}'` | `401 WEBHOOK_SIGNATURE_INVALID`, прогона нет | | |
+| SM-21 | **[вручную]** `curl -si -X POST "$PUBLIC_ORIGIN/api/v1/webhooks/github" -H 'X-GitHub-Event: pull_request' -H 'X-Hub-Signature-256: sha256=00' -d '{}'` | `401 WEBHOOK_SIGNATURE_INVALID`, прогона нет | | |
 | SM-22 | **[вручную]** E2E-02: в Recent Deliveries нажать Redeliver у доставки из SM-20 | `202` с тем же `id` прогона; второго прогона и второго ревью в PR нет | | |
 | SM-23 | **[авто]** E2E-02: `test_e2e_02_a_redelivered_webhook_creates_no_second_run_or_review`, `test_e2e_02b_…` | зелёные | | |
 | SM-24 | **[вручную]** E2E-06: PR без дефектов (косметика) | check run «Идёт ревью» → «Ревью пройдено»; в PR только summary, inline — ноль | | |

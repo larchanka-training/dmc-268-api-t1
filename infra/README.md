@@ -152,9 +152,9 @@ cd infra && tofu init -backend=false -upgrade && tofu providers lock \
 
 Порядок такой: образ собирается и публикуется в `ghcr.io/larchanka-training/dmc-268-api-t1` с тегом по commit sha → сверка, что коммит всё ещё вершина `develop` (`check-tip.sh`) → поднимается хранилище состояния и туннель к нему → targeted-план сети, базы и брокера в файл, сторож и его apply (`infra.sh`) → план полного выката в файл и сторож томов (`plan.sh`) → pull образа API → пароли базы и брокера из секретов (`passwords.sh`, раздел «Смена паролей») → миграции (`.github/scripts/deploy/migrate.sh`) → `tofu apply` этого плана (`apply.sh`) → проверка воркера → уборка образов → summary (`summary.sh`). Если упал шаг, который пишет состояние, между apply и проверками идёт восстановление состояния (раздел «Если деплой упал посреди apply»).
 
-**Устаревший коммит не катится.** `gate` сверяет коммит с вершиной `develop`, но только у `workflow_run` и только при своём запуске, а «Re-run failed jobs» успешный `gate` не перезапускает и берёт его выход `sha` из первой попытки. Поэтому первым шагом после checkout job `deploy` сверяет коммит ещё раз (`check-tip.sh`) — и для ручного запуска тоже: вершина ушла — остальные шаги пропускаются, job зелёный, в summary «пропущен: вершина develop уже …». Перезапуск упавшего деплоя, пока за ним не пришёл новый коммит, катит как обычно. Публичной проверки здесь нет: API снаружи не публикуется, а его доступность по `https://62.169.24.237/api/v1/` проверяет деплой интерфейса.
+**Устаревший коммит не катится.** `gate` сверяет коммит с вершиной `develop`, но только у `workflow_run` и только при своём запуске, а «Re-run failed jobs» успешный `gate` не перезапускает и берёт его выход `sha` из первой попытки. Поэтому первым шагом после checkout job `deploy` сверяет коммит ещё раз (`check-tip.sh`) — и для ручного запуска тоже: вершина ушла — остальные шаги пропускаются, job зелёный, в summary «пропущен: вершина develop уже …». Перезапуск упавшего деплоя, пока за ним не пришёл новый коммит, катит как обычно. Публичной проверки здесь нет: API снаружи не публикуется, а его доступность по `<PUBLIC_ORIGIN>/api/v1/` проверяет деплой интерфейса.
 
-**Снаружи API адресуется через интерфейс, с исходным путём.** Публичный вход — `nginx` в контейнере фронтенда на **https://62.169.24.237** (сертификат Let's Encrypt на IP, HTTP перенаправляется на HTTPS; устройство — в `infra/README.md` репозитория `dmc-268-ui-t1`). Префикс он не трогает: браузерный `GET /api/v1/reviews` приходит сюда как `GET /api/v1/reviews`, поэтому роутеры монтируются на `/api/v1`, как требует контракт API. `/health` через этот вход не публикуется — проверка живости ходит мимо него.
+**Снаружи API адресуется через интерфейс, с исходным путём.** Публичный вход — `nginx` в контейнере фронтенда на публичном адресе стенда **`PUBLIC_ORIGIN`** (раздел «Публичный адрес стенда»; сертификат Let's Encrypt, HTTP перенаправляется на HTTPS; устройство — в `infra/README.md` репозитория `dmc-268-ui-t1`). Префикс он не трогает: браузерный `GET /api/v1/reviews` приходит сюда как `GET /api/v1/reviews`, поэтому роутеры монтируются на `/api/v1`, как требует контракт API. `/health` через этот вход не публикуется — проверка живости ходит мимо него.
 
 **Тома данных деплой не уничтожает.** У каждого тома (`docker_volume.postgres`, `docker_volume.rabbitmq`, `docker_volume.postgres_replica`, `docker_volume.postgres_backups`) — `lifecycle { prevent_destroy = true }`: план, который уничтожает или заменяет том, OpenTofu отклоняет до изменений на сервере с `Error: Resource instance cannot be destroyed`. Это действует и на targeted apply шага «Поднять базу и брокер» — `-target=docker_container.postgres` тянет том зависимостью; тот же сторож `scripts/deploy_report.py` смотрит и его план (`infra.sh`). Полный выкат идёт планом в файл: `plan.sh` строит `tofu plan -out=tfplan` сразу после targeted apply, и `scripts/deploy_report.py` по `tofu show -json` дублирует проверку для summary — падает, если план уничтожает или заменяет любой `docker_volume`, и apply не запускается. Списка адресов у сторожа нет: ресурс, переименованный без блока `moved`, уничтожается по старому адресу, и `prevent_destroy` у него уже нет — по списку его бы не поймать. Миграции идут между планом и apply: состояние они не трогают, план не устаревает. Применяется ровно проверенный план (`apply.sh`); если до него не дошло, файл плана удаляет `summary.sh`. Сменить том, как при смене сборки PostgreSQL или версии RabbitMQ, — новым ресурсом с новым адресом (с `prevent_destroy` — его наличие у каждого тома сверяет тест), а прежний снять с учёта блоком `removed { lifecycle { destroy = false } }`: план выйдет `forget` и `create`, старый том с данными останется на сервере до ручного `docker volume rm`. Файл плана зашифрован фразой состояния (раздел «Шифрование состояния»), а в JSON `tofu show -json` пароли открытым текстом: JSON идёт только трубой, файл плана удаляется после apply и артефактом не загружается, обёртка `setup-opentofu`, копирующая stdout tofu в выходы шага, выключена.
 
@@ -205,6 +205,7 @@ tofu apply infra.tfplan
 | `state_passphrase` | секрет `STATE_PASSPHRASE_DMC268_T1` (environment `stand`), не короче 16 символов — фраза шифрования состояния и плана (`encryption.tf`). Нужна уже `tofu init` с бэкендом; копия — вне GitHub (раздел «Шифрование состояния») |
 | `github_webhook_secret` | секрет `WEBHOOK_SECRET_DMC268_T1` |
 | `user_token_encryption_key` | секрет `USER_TOKEN_KEY_DMC268_T1` — 32 байта в base64 (`openssl rand -base64 32`). Без него или с битым значением `apply` падает на проверке переменной: стенд не стартует без шифрования токенов пользователя. Генерация и установка — `README.md`, «Ключ шифрования токенов пользователя» |
+| `public_origin` | переменная `PUBLIC_ORIGIN` — публичный адрес стенда `https://<домен>`, а пока её нет — `https://` + `VPS_DMC268_IP_T1` (раздел «Публичный адрес стенда»). С ним API сверяет `Origin` изменяющих запросов, от него строит callback входа `<PUBLIC_ORIGIN>/api/v1/auth/github/callback` (регистрируется в настройках GitHub App) и ссылку из check run. Не `https://<хост>` строчными ровно (слеш или точка на конце, путь, порт, заглавные, `http://`) — `plan` падает на проверке переменной; не заданы обе переменные (адрес выходит `https://` без хоста) — шаг «Поднять базу и брокер» (`infra.sh`) падает до `plan` и `apply`. Локальному `apply` её можно не задавать |
 | `docker_host` | `ssh://stand`: хост `stand` в `~/.ssh/config` собирает `.github/actions/stand-ssh` из `VPS_DMC268_U` и `VPS_DMC268_IP_T1` |
 | `bind_ip` | `127.0.0.1`: API снаружи не публикуется, к нему ходит интерфейс изнутри docker-сети |
 | `llm_backend` | `eurorouter` прямо в `deploy.yml` (#245) |
@@ -223,11 +224,142 @@ tofu apply infra.tfplan
 | `github_app_client_id` | переменная `APP_CLIENT_ID_DMC268_T1` |
 | `github_app_client_secret` | секрет `APP_CLIENT_SECRET_DMC268_T1` |
 | `stripe_webhook_secret`, `stripe_api_key` | секреты `STRIPE_WEBHOOK_SECRET_DMC268_T1` (signing secret thin-событий, `whsec_…`) и `STRIPE_API_KEY_DMC268_T1` (restricted-ключ `rk_…` только на чтение Checkout Sessions). Только контейнеру `api`. Без любого из двух пополнение через Stripe выключено: вебхук отвечает `503 PAYMENTS_DISABLED`, ручное зачисление работает. Настройка в Stripe — `docs/LOCAL_RUN.md`, «Пополнение через Stripe» |
-| `public_origin` | `https://` + `VPS_DMC268_IP_T1`: интерфейс отдаётся по HTTPS на тот же адрес. Callback `<public_origin>/api/v1/auth/github/callback` регистрируется в настройках GitHub App |
 | `alert_telegram_bot_token`, `alert_telegram_chat_id` | секреты `TELEGRAM_BOT_TOKEN_DMC268_T1` и `TELEGRAM_CHAT_ID_DMC268_T1` — бот, от имени которого Alertmanager шлёт алерты, и чат, куда (раздел «Алерты»). Без них алерты считаются и видны в Alertmanager, но в Telegram не уходят. Заданные проверяются на формат — токен `<id>:<ключ>`, chat id числом: битое значение роняет `plan`. В Alertmanager токен приходит файлом (`upload`), поэтому в `docker inspect` его не видно, но в state OpenTofu он есть — так же, как пароли из `env` остальных контейнеров; state зашифрован фразой (раздел «Шифрование состояния») и лежит в хранилище на петле сервера (раздел «Хранилище состояния»). Ставятся вручную: `gh secret set TELEGRAM_BOT_TOKEN_DMC268_T1 -R larchanka-training/dmc-268-api-t1` (значение — со stdin) и так же chat id; следующий деплой пересоздаёт Alertmanager с ними |
 | `alert_heartbeat_url` | секрет `ALERT_HEARTBEAT_URL_DMC268_T1` — адрес пинга внешнего heartbeat-сервиса для `Watchdog` (раздел «Алерты», «Dead man's switch»). Без него деплой проходит с предупреждением, а падение самого Prometheus или Alertmanager никто не заметит. Только `https://<хост>/<путь>` без пробелов: другое значение роняет `plan`. В Alertmanager приходит файлом (`upload`, `url_file`), в его логе адрес скрыт (`<redacted>`); из него же деплой строит адрес `/fail` для `AlertDeliveryFailing`. Ставится вручную: `gh secret set ALERT_HEARTBEAT_URL_DMC268_T1 -R larchanka-training/dmc-268-api-t1` (значение — со stdin), следующий деплой пересоздаёт Alertmanager |
 
 Из этого стека наружу не смотрит ничего. API, PostgreSQL и RabbitMQ публикуются на петле сервера, воркер не публикуется вовсе; снаружи доступен только интерфейс, и API — через его `/api/`.
+
+### Публичный адрес стенда
+
+Адрес сервиса и адрес сервера — две разные переменные. `VPS_DMC268_IP_T1` (организации) — IP
+сервера: по нему ходит SSH (`.github/actions/stand-ssh`, `db-backup.yml`), его ключ закреплён в
+`.github/ssh/known_hosts`. `PUBLIC_ORIGIN` — публичный адрес сервиса, `https://<домен>`: его
+получают API и воркер (`public_origin`), Grafana (`<PUBLIC_ORIGIN>:8443/grafana/`), проба
+публичного входа (`PublicEndpointDown`) и строка «Адрес» в summary деплоя (change
+`public-domain-origin`). Пока `PUBLIC_ORIGIN` не задана, деплой берёт `https://` +
+`VPS_DMC268_IP_T1` — так же поступает фронт, и стенд работает по IP, как до перехода на домен.
+
+Значение — ровно `https://` + `PUBLIC_HOST` фронта (`dmc-268-ui-t1`), строчными, без слеша и
+точки на конце, пути и порта: браузер присылает `Origin` в нижнем регистре, API сравнивает его
+строкой, и любое расхождение даёт `403 ORIGIN_FORBIDDEN` на каждый изменяющий запрос. Другое
+написание отклоняет проверка переменной `public_origin` на `plan`, до изменений на сервере.
+
+```bash
+gh variable set PUBLIC_ORIGIN -R larchanka-training/dmc-268-api-t1 --body https://<домен>
+gh variable get PUBLIC_ORIGIN -R larchanka-training/dmc-268-api-t1
+```
+
+Значение подхватывает следующий деплой (`gh workflow run deploy.yml --ref develop`). Удалить
+переменную — вернуться к адресу по IP. Адрес без хоста (не заданы ни `PUBLIC_ORIGIN`, ни
+`VPS_DMC268_IP_T1`, выражение даёт `https://`) `infra.sh` отклоняет до `plan` и `apply`.
+
+**Смена адреса** (переход с IP на домен или на другой домен) затрагивает оба репозитория и
+GitHub App; порядок — из design change `public-domain-origin`. Ниже «старый адрес» — текущий
+`PUBLIC_ORIGIN` (пока переменная не задана — `https://<VPS_DMC268_IP_T1>`), «домен» — новый.
+
+С шага 3 до шага 5 горит критический алерт `PublicEndpointDown` (проба `https_public` по
+`public_origin` проверяет цепочку сертификата): до шага 4 она ходит по старому адресу, а фронт
+там уже отдаёт staging-сертификат домена или перенаправляет на домен, после шага 4 — прямо по
+домену; staging Let's Encrypt проба не доверяет до шага 5. Перед шагом 3 заглушите его на
+время окна и снимите тишину после шага 5 (раздел «Алерты»). Тишина на 2 часа; если DNS или
+выкатка тянутся дольше — продлите её до истечения (`amtool silence update <id> --duration=…`
+или новый `silence add`):
+
+```bash
+ssh stand 'docker exec dmc268-alertmanager amtool silence add alertname=PublicEndpointDown --duration=2h --comment="смена адреса стенда" --alertmanager.url=http://127.0.0.1:9093'
+ssh stand 'docker exec dmc268-alertmanager amtool silence query --alertmanager.url=http://127.0.0.1:9093'
+ssh stand 'docker exec dmc268-alertmanager amtool silence expire <id> --alertmanager.url=http://127.0.0.1:9093'
+```
+
+**Окно без вебхуков.** У `nginx` фронта на 443 один `server`, поэтому с шага 3 по старому
+адресу отдаётся сертификат домена. GitHub проверяет TLS при доставке, и доставки на старый
+Webhook URL падают с шага 3 до шага 6: PR в это время ревью не получают. Раньше шага 5
+Webhook URL на домен не переключить — staging-сертификату GitHub не доверяет. Поэтому шаги 5
+и 6 делаются подряд, без паузы.
+
+**Упавшие за окно доставки повторяет воркер** (#149, `app/application/webhook_redelivery.py`):
+5 попыток с паузой 5, 10, 20, 40 и 80 минут — около 2,5 ч от падения доставки, — а устаревшую
+доставку `pull_request` он пропускает, сверив её с текущей головой PR. Ручной Redeliver эту
+сверку обходит и может вернуть ревью на старую голову, поэтому вслепую все упавшие доставки не
+переотправляем. Уложилось окно в ~2,5 ч — ждём воркер, а Redeliver в Recent Deliveries App
+делаем только для того, что после его попыток осталось красным: последнюю доставку
+`pull_request` с действием `opened`/`synchronize`/`edited` на каждый PR и по каждому треду его
+последнюю доставку `pull_request_review_thread` — только если красная она сама. Последняя
+доставка PR не годится: у треда нет head, а последней может оказаться `labeled`/`closed`, их
+приём игнорирует. Из доставок треда — только последняя, а не все красные и не «последняя
+красная»: `resolved`/`unresolved` приём применяет без сверки с GitHub (побеждает последняя
+применённая), а сверка с GitHub (`sync_open_threads_from_host`) чинит только треды, открытые в
+базе. Тред закрыли и открыли снова, обе доставки красные — Recent Deliveries идёт от новых к
+старым, и Redeliver всех красных подряд запишет `resolved` поверх открытого в GitHub треда:
+gate мёржа пропустит открытый блокирующий. Последняя доставка треда зелёная — его не трогаем.
+Окно дольше ~2,5 ч — попытки воркера кончаются, и ручной Redeliver того же набора обязателен.
+
+1. DNS: A-запись домена указывает на IP сервера (`VPS_DMC268_IP_T1`); проверка —
+   `dig +short <домен>` отдаёт этот IP.
+2. Админ GitHub App **добавляет** Callback URL `https://<домен>/api/v1/auth/github/callback`
+   вторым (App принимает до 10), а callback по старому адресу оставляет. С шага 4 API строит
+   `redirect_uri` от нового `PUBLIC_ORIGIN`, и незарегистрированный callback не пустит в
+   сервис никого.
+3. Фронт (`dmc-268-ui-t1`) деплоится с доменом на staging Let's Encrypt (`acme_directory`):
+   у боевого лимит — 5 одинаковых сертификатов в неделю, отладка на нём его съест. Том
+   `dmc268-ui-acme` не трогаем. С этого шага начинается окно без вебхуков.
+4. Бэкенд: `gh variable set PUBLIC_ORIGIN --body https://<домен>` и деплой. Между шагами 3 и 4
+   изменяющие запросы с нового адреса получают `403 ORIGIN_FORBIDDEN` и не работает вход:
+   `redirect_uri` ещё по старому адресу, а host-only `oauth_state` на него не уходит, — окно в
+   минуты. Обязательная проверка после деплоя (`-k` — пока сертификат staging):
+
+   ```bash
+   export PUBLIC_ORIGIN=https://<домен>
+   FRONT_HOST="$(gh variable get PUBLIC_HOST -R larchanka-training/dmc-268-ui-t1 2>/dev/null || gh api repos/larchanka-training/dmc-268-ui-t1/actions/organization-variables -q '.variables[]|select(.name=="VPS_DMC268_IP_T1").value')"
+   curl -sik -X POST "$PUBLIC_ORIGIN/api/v1/auth/logout" -H "Origin: https://$FRONT_HOST"
+   ```
+
+   `Origin` берётся у фронта тем же выражением, что и в его деплое (`PUBLIC_HOST`, без неё — IP
+   стенда), поэтому `403 ORIGIN_FORBIDDEN` значит расхождение `PUBLIC_ORIGIN` с `PUBLIC_HOST`.
+   `Origin` из `PUBLIC_ORIGIN` для пробы не годится: у `nginx` фронта на 443 один `server`, `-k`
+   прощает чужое имя, и проба дала бы `204` там, где браузер получит `403`. Ждём `204`; при
+   `403` деплой зелёный, а изменяющие запросы из браузера не проходят.
+5. Фронт переключается на боевой Let's Encrypt; `PublicEndpointDown` гаснет — тишину снять.
+6. Сразу за шагом 5 админ GitHub App меняет Webhook URL на
+   `<PUBLIC_ORIGIN>/api/v1/webhooks/github` и Setup URL на
+   `<PUBLIC_ORIGIN>/api/v1/auth/github/setup` с включённым «Redirect on update»
+   (`docs/GITHUB_APP.md`, таблица настроек App). Callback URL на этом шаге не трогаем.
+   Упавшие за окно доставки — по абзацу «Упавшие за окно доставки повторяет воркер»: ручной
+   Redeliver в Advanced → Recent Deliveries — только оставшегося красным после попыток воркера:
+   последнюю доставку `pull_request` с действием `opened`/`synchronize`/`edited` на каждый PR и
+   по каждому треду последнюю доставку `pull_request_review_thread`, если красная она сама
+   (GitHub хранит доставки около 3 дней).
+   Callback по старому адресу удаляется, когда домен устоялся (откат больше не нужен).
+
+Cookie сессии host-only (без `Domain`), поэтому после переезда входят заново все: cookie
+старого адреса браузер на домен не отправит. То же — после отката.
+
+Проверка после выкатки — `docs/testing/RELEASE_SMOKE.md`, SM-04, SM-13, SM-15 и SM-21 по новому
+адресу; проба `Origin` из шага 4 без `-k` отдаёт `204`; вход через GitHub работает, в Recent
+Deliveries App — `2xx`.
+
+**Откат на адрес по IP** — в обратном порядке: сначала бэкенд, потом фронт. Callback по IP
+должен быть зарегистрирован в App: если его уже удалили, админ App добавляет его вторым до
+шага 1.
+
+1. Бэкенд: `gh variable delete PUBLIC_ORIGIN -R larchanka-training/dmc-268-api-t1` и деплой
+   (`gh workflow run deploy.yml --ref develop`) — origin снова `https://<VPS_DMC268_IP_T1>`.
+2. Фронт (`dmc-268-ui-t1`) деплоится обратно на IP — по его `infra/README.md`. После шага
+   проба `Origin` из шага 4 выкатки без `-k` с `PUBLIC_ORIGIN=https://<VPS_DMC268_IP_T1>`
+   отдаёт `204`: `PUBLIC_HOST` у фронта после отката не задана, и `FRONT_HOST` сам берёт IP.
+3. Сразу за шагом 2 админ GitHub App возвращает на адрес по IP только Webhook и Setup URL;
+   Callback URL не трогаем — оба callback зарегистрированы. Упавшие доставки — так же, как
+   при выкатке: их повторяет воркер, ручной Redeliver — только оставшегося красным: последнюю
+   доставку `pull_request` с действием `opened`/`synchronize`/`edited` на каждый PR и по
+   каждому треду последнюю доставку `pull_request_review_thread`, если красная она сама.
+
+Между шагами 1 и 2 браузер ещё ходит по домену, а API ждёт origin по IP: изменяющие запросы
+получают `403 ORIGIN_FORBIDDEN` и не работает вход — `redirect_uri` уже по IP, а host-only
+`oauth_state` домена туда не уходит; окно в минуты, как при выкатке. Вебхуки тоже идут с окном:
+до шага 2 Webhook URL смотрит на домен, и домен отдаёт свой сертификат — доставки проходят;
+после шага 2 фронт на IP, и домен из Webhook URL отдаёт сертификат IP — GitHub доставку не
+принимает до шага 3. Поэтому шаги 2 и 3 подряд. `PublicEndpointDown` на
+время отката тоже глушится. После отката все входят заново: cookie сессии host-only.
 
 ## Масштабирование воркеров
 
@@ -274,7 +406,7 @@ tofu apply infra.tfplan
 | `STRIPE_WEBHOOK_SECRET_DMC268_T1` | signing secret (`whsec_…`) вебхука Stripe: подпись thin-событий | `api` | админ аккаунта Stripe | в Dashboard у endpoint «Roll secret» (старый можно оставить действующим до 24 часов, пока обе подписи принимаются) → секрет → деплой; без отсрочки события между roll и деплоем получают отказ по подписи, Stripe их повторяет |
 | `GITHUB_TOKEN` | pull образа из `ghcr.io` | раннер деплоя | GitHub | выдаётся на каждый прогон, ротация не нужна |
 
-Переменные `APP_ID_DMC268_T1`, `APP_CLIENT_ID_DMC268_T1`, `VPS_DMC268_IP_T1`, `AI_DMC268_URL` — не секреты: меняются `gh variable set` и деплоем.
+Переменные `APP_ID_DMC268_T1`, `APP_CLIENT_ID_DMC268_T1`, `VPS_DMC268_IP_T1`, `PUBLIC_ORIGIN`, `AI_DMC268_URL` — не секреты: меняются `gh variable set` и деплоем.
 
 Рассмотрели и не делаем:
 
@@ -428,8 +560,8 @@ internal-сети Docker не публикует. Выход наружу чер
 `GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES`). Локальный compose повторяет раскладку: сеть
 `observability` — `internal`, порт Grafana — через отдельную сеть `grafana`.
 
-**Вход в Grafana стенда** — через публичный вход на порту 8443: `https://<VPS_DMC268_IP_T1>:8443/grafana/`
-(сейчас https://62.169.24.237:8443/grafana/). Хост и сертификат те же, что у кабинета, но
+**Вход в Grafana стенда** — через публичный вход на порту 8443: `<PUBLIC_ORIGIN>:8443/grafana/`
+(раздел «Публичный адрес стенда»). Хост и сертификат те же, что у кабинета, но
 отдельный порт — это свой origin, и XSS в Grafana не прочитает API кабинета. nginx интерфейса
 слушает 8443, проксирует подпуть по сети `dmc268-grafana-proxy`, TLS терминирует он же. Вход только по учётке: анонимный вход и
 регистрация выключены, у каждого участника — личная учётка, её заводит админ
@@ -440,8 +572,8 @@ internal-сети Docker не публикует. Выход наружу чер
 5 минут, и по известному имени `admin` кто угодно держит его заблокированным через форму входа.
 `GF_SECURITY_ADMIN_USER` для этого не годится — действует только при создании тома, поэтому
 после пересоздания тома `dmc268-grafana-data` шаг повторяют. Env Grafana для публичного входа:
-`GF_SERVER_ROOT_URL` — `public_origin`, порт `8443` и `/grafana/` (слеш на конце `public_origin`
-отбрасывается; без `public_origin` — относительный `/grafana/`; порт — константа
+`GF_SERVER_ROOT_URL` — `public_origin`, порт `8443` и `/grafana/` (слеша на конце и порта у
+`public_origin` не бывает — их не пускает проверка переменной; без `public_origin` — относительный `/grafana/`; порт — константа
 `local.grafana_public_root_url`, его слушает nginx интерфейса, меняется только вместе с фронтом), `GF_SERVER_SERVE_FROM_SUB_PATH=true`, `GF_SECURITY_COOKIE_SECURE=true` — cookie
 сессии только по HTTPS, `GF_METRICS_ENABLED=false` — `/grafana/metrics` иначе отдаётся без входа
 (версия, коммит, число пользователей; Prometheus стенда Grafana не опрашивает),

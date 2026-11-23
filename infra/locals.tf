@@ -122,10 +122,10 @@ locals {
   # что у кабинета, но свой порт 8443 — значит, свой origin, и XSS в Grafana
   # не читает API кабинета. Порт слушает nginx интерфейса (dmc-268-ui-t1),
   # бэкенд его не публикует — поэтому константа, а не переменная: менять его
-  # можно только вместе с фронтом. trimsuffix — на случай public_origin со
-  # слешем на конце. С пустым public_origin root_url — относительный
-  # /grafana/, Grafana с ним стартует (проверено на 13.2.4).
-  grafana_public_root_url = var.public_origin == "" ? "/grafana/" : "${trimsuffix(var.public_origin, "/")}:8443/grafana/"
+  # можно только вместе с фронтом. Слеша на конце и порта у public_origin не
+  # бывает — их не пускает проверка переменной. С пустым public_origin
+  # root_url — относительный /grafana/, Grafana с ним стартует (проверено на 13.2.4).
+  grafana_public_root_url = var.public_origin == "" ? "/grafana/" : "${var.public_origin}:8443/grafana/"
 
   # Окружение, без которого не загрузятся общие настройки (`load_settings`):
   # его получают оба контейнера из образа приложения — api и worker — и

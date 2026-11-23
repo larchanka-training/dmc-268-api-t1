@@ -23,7 +23,7 @@
 | **Владелец приложения** | Тот, кто создал приложение и меняет его настройки. У нас приложение `botyanya` создано в личном аккаунте `ilyassakhanov`, приложение публичное |
 | **Владелец установки** | Аккаунт или организация, где лежат репозитории: первая часть адреса `github.com/<владелец>/<репозиторий>` |
 | **Интерфейс** | Фронтенд сервиса, репозиторий `dmc-268-ui-t1` |
-| **Стенд** | Сервер, где развёрнут сервис. Его адрес задаёт `PUBLIC_ORIGIN`, сейчас `https://62.169.24.237`; ниже он пишется как `<PUBLIC_ORIGIN>` |
+| **Стенд** | Сервер, где развёрнут сервис. Его публичный адрес — переменная репозитория `PUBLIC_ORIGIN` (`https://<домен>`, узнать: `gh variable get PUBLIC_ORIGIN -R larchanka-training/dmc-268-api-t1`; пока `PUBLIC_ORIGIN` не задана, `<PUBLIC_ORIGIN>` = `https://<VPS_DMC268_IP_T1>` — стенд работает по IP; IP — переменная организации, узнать: `gh api repos/larchanka-training/dmc-268-api-t1/actions/organization-variables -q '.variables[]\|select(.name=="VPS_DMC268_IP_T1").value'`; [infra/README](../infra/README.md), «Публичный адрес стенда»); ниже он пишется как `<PUBLIC_ORIGIN>` |
 
 Доступов к GitHub у сервиса три, и их легко спутать:
 
@@ -309,7 +309,7 @@ GitHub присылает как `CONTRIBUTOR`) или из форка от ав
 
 | Поле | Значение | Если не так |
 |---|---|---|
-| Callback URL | `<PUBLIC_ORIGIN>/api/v1/auth/github/callback` | вход в сервис падает |
+| Callback URL | `<PUBLIC_ORIGIN>/api/v1/auth/github/callback`; на время смены адреса — два, старый и новый (порядок — [infra/README](../infra/README.md), «Смена адреса») | вход в сервис падает |
 | Request user authorization (OAuth) during installation | выключено | по документации GitHub при включённой галочке Setup URL не используется, после установки пользователь уходит на Callback URL |
 | Webhook → Active | включено | GitHub не шлёт событий, прогонов нет |
 | Webhook URL | `<PUBLIC_ORIGIN>/api/v1/webhooks/github` | то же |
