@@ -97,8 +97,8 @@ SWEEP_INTERVAL_SECONDS = 60.0
 # не рвёт и на прогоне в минуты.
 WORKER_HEARTBEAT_SECONDS = 30
 
-# Как часто цикл соединения проверяет, закончил ли обработчик или проход очистки: заодно шаг
-# ответа на heartbeat.
+# Такт цикла соединения, пока идёт обработчик или проход очистки: шаг ответа на heartbeat и
+# проверки просьбы остановиться. Конец работы такта не ждёт: поток будит цикл сам (#401).
 _HANDLER_POLL_SECONDS = 1
 
 # Пауза перед возвратом не начатого прогона в очередь (#157). Брокер отдаёт возвращённое
@@ -301,10 +301,16 @@ class Worker:
         `BlockingConnection` отвечает брокеру на heartbeat только внутри своего цикла: при
         работе в главном потоке он стоит минутами, и брокер рвёт соединение. Канал pika не
         потокобезопасен, поэтому `work` к нему не прикасается — ack и reject делает главный
-        поток потом. Исключение `work` возвращается; `KeyboardInterrupt` и `SystemExit`
-        пробрасываются в главный поток.
+        поток потом. Закончив, поток будит цикл единственным потокобезопасным вызовом
+        `add_callback_threadsafe`: иначе главный поток заметил бы конец только на следующем
+        такте, и ack ждал бы до секунды (#401). Цикл ждёт события `done`, выставленного до
+        пробуждения, а не смерти потока: колбэк встаёт в очередь раньше, чем
+        `add_callback_threadsafe` вернётся, и проснувшийся цикл застал бы поток живым, а
+        следующего пробуждения уже не будет. Исключение `work` возвращается;
+        `KeyboardInterrupt` и `SystemExit` пробрасываются в главный поток.
         """
         failure: list[BaseException] = []
+        done = threading.Event()
 
         def target() -> None:
             try:
@@ -312,10 +318,17 @@ class Worker:
             # BaseException тоже: в потоке он молча убил бы поток, а сообщение ушло бы в ack.
             except BaseException as caught:  # noqa: BLE001 — исход решает вызывающий или главный поток
                 failure.append(caught)
+            finally:
+                # До пробуждения: проснувшийся цикл уже видит конец работы.
+                done.set()
+                # Закрытое соединение будить нечем: о его потере главный поток узнает из
+                # `process_data_events`, как без пробуждения.
+                with contextlib.suppress(pika.exceptions.ConnectionWrongStateError):
+                    self.connection.add_callback_threadsafe(_wake_up)
 
         thread = threading.Thread(target=target, name=name, daemon=True)
         thread.start()
-        while thread.is_alive():
+        while not done.is_set():
             try:
                 self.connection.process_data_events(time_limit=_HANDLER_POLL_SECONDS)
             except Exception:
@@ -324,7 +337,8 @@ class Worker:
                 # подтвердит уже завершённый прогон (`run_review` его пропускает).
                 thread.join()
                 raise
-            thread.join(timeout=0)
+        # Работа кончилась, ждём только хвост `add_callback_threadsafe`.
+        thread.join()
         if not failure:
             return None
         caught = failure[0]
@@ -353,6 +367,10 @@ class Worker:
         if method is not None:
             assert method.delivery_tag is not None
             self.channel.basic_nack(method.delivery_tag, requeue=True)
+
+
+def _wake_up() -> None:
+    """Пустой колбэк: его постановка из другого потока прерывает `process_data_events`."""
 
 
 def build_worker(settings: Settings, *, heartbeat: int = WORKER_HEARTBEAT_SECONDS) -> Worker:

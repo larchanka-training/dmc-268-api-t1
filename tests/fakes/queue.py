@@ -4,8 +4,8 @@
 ack/nack. Без брокера.
 """
 
-import time
-from collections.abc import Iterator, Sequence
+import threading
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
 
@@ -72,7 +72,11 @@ class FakeChannel:
 
 
 class FakeConnection:
-    """Соединение вместо pika: помнит, что его закрыли."""
+    """Соединение вместо pika: помнит, что его закрыли.
+
+    `process_data_events` ждёт до `time_limit`, как pika, и возвращается раньше, если другой
+    поток поставил колбэк через `add_callback_threadsafe`: колбэк выполняется в цикле.
+    """
 
     def __init__(self) -> None:
         self.closed = False
@@ -80,10 +84,24 @@ class FakeConnection:
         self.polls = 0
         # Шаги паузы циклом соединения (`connection.sleep`) — перед возвратом сообщения.
         self.slept: list[float] = []
+        # Колбэки из других потоков, ждущие цикла соединения.
+        self._callbacks: list[Callable[[], None]] = []
+        self._woken = threading.Event()
+        self._lock = threading.Lock()
+
+    def add_callback_threadsafe(self, callback: Callable[[], None]) -> None:
+        with self._lock:
+            self._callbacks.append(callback)
+            self._woken.set()
 
     def process_data_events(self, time_limit: float = 0) -> None:
         self.polls += 1
-        time.sleep(min(time_limit, 0.01))
+        self._woken.wait(timeout=time_limit)
+        with self._lock:
+            callbacks, self._callbacks = self._callbacks, []
+            self._woken.clear()
+        for callback in callbacks:
+            callback()
 
     def sleep(self, duration: float) -> None:
         self.slept.append(duration)
